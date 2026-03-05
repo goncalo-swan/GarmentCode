@@ -16,16 +16,17 @@ sim:
     resolution_scale: 1.0
     ground: false
     material:
+      # 100% recycled polyester sweatpants (lightweight, smooth, moderate drape)
       garment_tri_ka: 10000.0
-      garment_edge_ke: 1.0
+      garment_edge_ke: 30.0
       garment_tri_ke: 10000.0
       spring_ke: 50000.0
       garment_edge_kd: 10.0
       garment_tri_kd: 1.0
       spring_kd: 10.0
-      fabric_density: 1.0
+      fabric_density: 0.8
       fabric_thickness: 0.1
-      fabric_friction: 0.5
+      fabric_friction: 0.3
     options:
       enable_particle_particle_collisions: false
       enable_triangle_particle_collisions: true
@@ -40,20 +41,11 @@ sim:
       enable_attachment_constraint: true
       attachment_stiffness:
       - 1000.
-      - 1000.
-      - 1000.
-      - 1000.
       attachment_damping:
       - 10.
-      - 0.
-      - 0.
-      - 0.
       attachment_frames: 600
       attachment_label_names:
       - lower_interface
-      - right_collar
-      - left_collar
-      - strapless_top
 
       enable_cloth_reference_drag: true
       cloth_reference_margin: 0.1

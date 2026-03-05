@@ -6,8 +6,8 @@ sim:
     max_frame_time: 60
     max_meshgen_time: 60
     max_sim_time: 1800
-    static_threshold: 0.05
-    non_static_percent: 5.0
+    static_threshold: 0.03
+    non_static_percent: 3.0
 
     max_body_collisions: 1000
     max_self_collisions: 3000
@@ -16,16 +16,19 @@ sim:
     resolution_scale: 1.0
     ground: false
     material:
-      garment_tri_ka: 10000.0
-      garment_edge_ke: 1.0
-      garment_tri_ke: 10000.0
-      spring_ke: 50000.0
+      # 77% recycled polyester / 23% elastane (compression leggings)
+      # Moderate tri stiffness to resist crotch sag while allowing ankle conforming.
+      # Low edge bending stiffness for smooth draping around calf/ankle curves.
+      garment_tri_ka: 8000.0
+      garment_edge_ke: 10.0
+      garment_tri_ke: 8000.0
+      spring_ke: 40000.0
       garment_edge_kd: 10.0
       garment_tri_kd: 1.0
       spring_kd: 10.0
-      fabric_density: 1.0
-      fabric_thickness: 0.1
-      fabric_friction: 0.5
+      fabric_density: 0.65
+      fabric_thickness: 0.08
+      fabric_friction: 0.3
     options:
       enable_particle_particle_collisions: false
       enable_triangle_particle_collisions: true
@@ -33,27 +36,18 @@ sim:
       enable_body_collision_filters: true
       enable_global_collision_filter: true
 
-      global_damping_factor: 0.5
+      global_damping_factor: 0.7
       global_damping_effective_velocity: 0.0
       global_max_velocity: 25.0
 
       enable_attachment_constraint: true
       attachment_stiffness:
-      - 1000.
-      - 1000.
-      - 1000.
-      - 1000.
+      - 10000.
       attachment_damping:
       - 10.
-      - 0.
-      - 0.
-      - 0.
-      attachment_frames: 600
+      attachment_frames: 7000
       attachment_label_names:
       - lower_interface
-      - right_collar
-      - left_collar
-      - strapless_top
 
       enable_cloth_reference_drag: true
       cloth_reference_margin: 0.1
@@ -62,7 +56,7 @@ sim:
       smoothing_recover_start_frame: 150
       smoothing_num_steps: 100
       smoothing_frame_gap_between_steps: 1
-      body_collision_thickness: 0.4
+      body_collision_thickness: 0.1
       body_friction: 0.5
   stats:
     fails: {}

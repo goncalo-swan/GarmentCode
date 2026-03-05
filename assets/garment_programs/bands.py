@@ -52,23 +52,26 @@ class StraightWB(BaseBand):
         self.hips_back_frac = body['hip_back_width'] / body['hips']
 
         # Params
-        self.width = design['waistband']['width']['v'] 
+        self.width = design['waistband']['width']['v']
         self.rise = rise
-        # Check correct values
-        if self.rise + self.width > 1:
-            self.rise = 1 - self.width
+
+        # Clamp interpolation factor at 1.0: for high-rise (rise > 1.0),
+        # waistband width stays at waist measurement (narrowest)
+        interp_factor = min(self.rise + self.width, 1.0)
 
         self.top_width = pyg.utils.lin_interpolation(
-            self.hips, self.waist, self.rise + self.width)
+            self.hips, self.waist, interp_factor)
         self.top_back_fraction = pyg.utils.lin_interpolation(
-            self.hips_back_frac, self.waist_back_frac, self.rise + self.width)
-        
+            self.hips_back_frac, self.waist_back_frac, interp_factor)
+
         self.width = self.width * body['hips_line']
 
         self.define_panels()
 
-        self.front.translate_by([0, body['_waist_level'], 20])
-        self.back.translate_by([0, body['_waist_level'], -15]) 
+        # For rise > 1.0 (high-rise), offset waistband above natural waist
+        rise_offset = max(0, (self.rise - 1.0)) * body['hips_line']
+        self.front.translate_by([0, body['_waist_level'] + rise_offset, 20])
+        self.back.translate_by([0, body['_waist_level'] + rise_offset, -15])
         
         self.stitching_rules = pyg.Stitches(
             (self.front.interfaces['right'], self.back.interfaces['right']),

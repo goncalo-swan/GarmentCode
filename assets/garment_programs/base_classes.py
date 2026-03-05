@@ -63,16 +63,21 @@ class BaseBottoms(pyg.Component):
         return self.rise
     
     def eval_rise(self, rise):
-        """Evaluate updated hip and waist-related measurements, 
-            corresponding to the provided rise value 
+        """Evaluate updated hip and waist-related measurements,
+            corresponding to the provided rise value.
+            rise > 1.0 extends above natural waist (high-rise);
+            width stays at waist measurement, only depth grows.
         """
         waist, hips = self.body['waist'], self.body['hips']
         hips_level = self.body['hips_line']
         self.adj_hips_depth = rise * hips_level
-        self.adj_waist = pyg.utils.lin_interpolation(hips, waist, rise)
+        # Clamp interpolation factor at 1.0: for rise > 1.0,
+        # width stays at waist (narrowest point)
+        width_factor = min(rise, 1.0)
+        self.adj_waist = pyg.utils.lin_interpolation(hips, waist, width_factor)
 
         self_adj_back_waist = pyg.utils.lin_interpolation(
-            self.body['hip_back_width'], self.body['waist_back_width'], rise)
+            self.body['hip_back_width'], self.body['waist_back_width'], width_factor)
 
         return self.adj_waist, self.adj_hips_depth, self_adj_back_waist
 

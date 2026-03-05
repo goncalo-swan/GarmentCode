@@ -85,18 +85,18 @@ class PantPanel(pyg.Panel):
         )
 
         left = pyg.CurveEdgeFactory.curve_from_tangents(
-            crotch_bottom.end,    
+            crotch_bottom.end,
             [
                 # NOTE "Magic value" (-2 cm) which we use to define default width:
                 #   just a little behing the crotch point
-                # NOTE: Ensuring same distance from the crotch point in both 
+                # NOTE: Ensuring same distance from the crotch point in both
                 #   front and back for matching curves
-                crotch_bottom.end[0] - 2 + flare, 
+                crotch_bottom.end[0] - 2 + flare,
                 # NOTE: The inside edge either matches the length of the outside (0, normal case)
                 # or when the inteded length is smaller than crotch depth,
                 # inside edge covers of the inside leg a bit below the crotch (panties-like shorts)
                 y:=min(0, length - crotch_depth_diff * 1.5)
-            ], 
+            ],
             target_tan1=[flare, y - crotch_bottom.end[1]],
             initial_guess=[0.3, 0]
         )
@@ -187,46 +187,52 @@ class PantsHalf(BaseBottoms):
         # Max: pant leg falls flat from the back
         # Mostly from the back side
         # => This controls the foundation width of the pant
-        min_ext = body['leg_circ'] - body['hips'] / 2  + 5  # 2 inch ease: from pattern making book 
-        front_hip = (body['hips'] - body['hip_back_width']) / 2
-        crotch_extention = min_ext * design['width']['v']  
+        # width_v scales the entire panel hip width (not just crotch extension)
+        width_v = design['width']['v']
+        min_ext = body['leg_circ'] - body['hips'] / 2  + 5  # 2 inch ease: from pattern making book
+        front_hip = (body['hips'] - body['hip_back_width']) / 2 * width_v
+        crotch_extention = min_ext * width_v
         front_extention = front_hip / 4    # From pattern making book
         back_extention = crotch_extention - front_extention
 
         length, cuff_len = design['length']['v'], design['cuff']['cuff_len']['v']
-        if design['cuff']['type']['v']: 
+        if design['cuff']['type']['v']:
             if length - cuff_len < design['length']['range'][0]:   # Min length from paramss
                 # Cannot be longer then a pant
                 cuff_len = length - design['length']['range'][0]
-            # Include the cuff into the overall length, 
-            # unless the requested length is too short to fit the cuff 
+            # Include the cuff into the overall length,
+            # unless the requested length is too short to fit the cuff
             # (to avoid negative length)
             length -= cuff_len
         length *= body['_leg_length']
         cuff_len *= body['_leg_length']
 
+        # For rise > 1.0 (high-rise), offset panel upward so waistband
+        # sits above the natural waist line (e.g. belly button level)
+        rise_offset = max(0, (self.rise - 1.0)) * body['hips_line']
+
         self.front = PantPanel(
             f'pant_f_{tag}', body, design,
             length=length,
             waist=(waist - waist_back) / 2,
-            hips=(body['hips'] - body['hip_back_width']) / 2,
+            hips=front_hip,
             hips_depth=hips_depth,
             dart_position = body['bust_points'] / 2,
             crotch_width=front_extention,
             match_top_int_to=(body['waist'] - body['waist_back_width']) / 2
-            ).translate_by([0, body['_waist_level'] - 5, 25])
+            ).translate_by([0, body['_waist_level'] - 5 + rise_offset, 25])
         self.back = PantPanel(
             f'pant_b_{tag}', body, design,
             length=length,
             waist=waist_back / 2,
-            hips=body['hip_back_width'] / 2,
+            hips=body['hip_back_width'] / 2 * width_v,
             hips_depth=hips_depth,
             hipline_ext=1.1,
             dart_position = body['bum_points'] / 2,
             crotch_width=back_extention,
             match_top_int_to=body['waist_back_width'] / 2,
             double_dart=True
-            ).translate_by([0, body['_waist_level'] - 5, -20])
+            ).translate_by([0, body['_waist_level'] - 5 + rise_offset, -20])
 
         self.stitching_rules = pyg.Stitches(
             (self.front.interfaces['outside'], self.back.interfaces['outside']),

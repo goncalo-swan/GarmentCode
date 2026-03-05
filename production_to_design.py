@@ -453,21 +453,26 @@ class ProductionToDesign:
         # pants.width.v = hip_circumference / body.hips (ease multiplier)
         hip_circ = garment.get('hip_circumference', garment['waist_circumference'] * 1.1)
         width_v = hip_circ / b['hips']
-        width_v = np.clip(width_v, 1.0, 1.5)
+        width_v = np.clip(width_v, 0.5, 1.5)
 
         # pants.length.v is relative to leg_length
         leg_length = b['_leg_length']
         length_v = garment['length'] / leg_length
-        length_v = np.clip(length_v, 0.2, 0.9)
+        length_v = np.clip(length_v, 0.2, 0.95)
 
-        # Flare: ankle vs hip width
+        # Flare: solve for flare_v from target leg opening circumference
+        # With width_v scaling both hips and crotch_ext:
+        #   leg_opening = (hips/2 + min_ext) * width_v - 4 + leg_circ*(flare_v - 1)
+        # where min_ext = leg_circ - hips/2 + 5, and the -4 comes from the
+        # "magic value" (-2 cm) offset on each panel's inside seam bottom.
         leg_opening = garment.get('leg_opening', hip_circ * 0.5)
-        flare_v = (leg_opening / b['hips']) / width_v
-        flare_v = np.clip(flare_v, 0.5, 1.2)
+        min_ext = b['leg_circ'] - b['hips'] / 2 + 5
+        flare_v = (leg_opening - (b['hips'] / 2 + min_ext) * width_v + 4 + b['leg_circ']) / b['leg_circ']
+        flare_v = np.clip(flare_v, 0.3, 1.2)
 
-        # Rise: how high the waistband sits (1.0 = natural waist)
+        # Rise: how high the waistband sits (1.0 = natural waist, >1.0 = high-rise)
         rise_v = garment.get('rise', 1.0)
-        rise_v = np.clip(rise_v, 0.5, 1.0)
+        rise_v = np.clip(rise_v, 0.5, 1.5)
 
         design = {
             'meta': {

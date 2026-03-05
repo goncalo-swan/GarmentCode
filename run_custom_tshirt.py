@@ -64,8 +64,11 @@ PRODUCTION_DATA = {
 }
 
 # Body parameters for GLOBAL MEN size 50
-BODY_YAML = './assets/bodies/global_men_size50_apose.yaml'
-BODY_NAME = 'global_men_size50_apose'
+# Simulation runs on A-pose body (works correctly with sleeves).
+# The result is then reposed to the custom pose using SMPL vertex correspondence.
+APOSE_BODY_YAML = './assets/bodies/global_men_size50_apose.yaml'
+APOSE_BODY_NAME = 'global_men_size50_apose'
+CUSTOM_BODY_NAME = 'global_men_size50_custom_pose'
 
 
 def map_production_to_design(prod, body_yaml_path):
@@ -134,7 +137,7 @@ def generate_pattern(size, design, body_yaml_path, output_base):
 
 
 def simulate_pattern(pattern_folder, garment_name, output_base):
-    """Run physics simulation for a generated pattern."""
+    """Run physics simulation on A-pose body."""
     from pygarment.meshgen.boxmeshgen import BoxMesh
     from pygarment.meshgen.simulation import run_sim
     from pygarment.meshgen.sim_config import PathCofig
@@ -158,7 +161,7 @@ def simulate_pattern(pattern_folder, garment_name, output_base):
         in_element_path=pattern_folder,
         out_path=output_base,
         in_name=in_name,
-        body_name=BODY_NAME,
+        body_name=APOSE_BODY_NAME,
         smpl_body=True,
         add_timestamp=True
     )
@@ -190,17 +193,176 @@ def simulate_pattern(pattern_folder, garment_name, output_base):
     return paths.out_el
 
 
-def save_combined_mesh(sim_folder, body_obj_path=f'./assets/bodies/{BODY_NAME}.obj'):
-    """Create combined body + garment mesh."""
-    import trimesh
+def _load_body_cm(body_obj_path):
+    """Load a body OBJ, convert to cm, shift feet to y=0."""
+    import igl
+    verts, faces = igl.read_triangle_mesh(str(body_obj_path))
+    # Convert meters to cm if needed
+    if verts.max() < 3.0:
+        verts = verts * 100.0
+    # Shift so feet are at y=0
+    min_y = verts[:, 1].min()
+    if min_y < 0:
+        verts[:, 1] += abs(min_y)
+    return verts, faces
+
+
+def repose_garment(sim_folder,
+                   apose_obj='./assets/bodies/global_men_size50_apose.obj',
+                   custom_obj='./assets/bodies/global_men_size50_custom_pose.obj'):
+    """Repose A-pose simulated garment to custom pose via barycentric projection.
+
+    Both body OBJs are the same SMPL mesh (6890 verts, same topology) in different
+    poses.  For each garment vertex we find the closest point on the A-pose body
+    surface, compute barycentric coordinates within that triangle, then evaluate
+    the same barycentric coords on the corresponding custom-pose triangle to get
+    a smooth displacement field.
+    """
+    import igl
 
     sim_folder = Path(sim_folder)
     sim_files = list(sim_folder.glob('*_sim.obj'))
     if not sim_files:
         print(f'  No *_sim.obj found in {sim_folder}')
+        return None
+    sim_path = sim_files[0]
+
+    # Load garment vertices (already in cm, y-shifted by the simulation)
+    g_verts, g_faces = igl.read_triangle_mesh(str(sim_path))
+
+    # Load both body meshes (same SMPL topology, different poses)
+    a_verts, a_faces = _load_body_cm(apose_obj)
+    c_verts, c_faces = _load_body_cm(custom_obj)
+
+    assert len(a_verts) == len(c_verts), \
+        f'Body vertex count mismatch: {len(a_verts)} vs {len(c_verts)}'
+    assert np.array_equal(a_faces, c_faces), \
+        'Body face topology mismatch between A-pose and custom pose'
+
+    # For each garment vertex, find closest point on A-pose body surface.
+    # Returns: squared distances, face indices, closest points
+    sq_dists, face_ids, closest_pts = igl.point_mesh_squared_distance(
+        g_verts.astype(np.float64),
+        a_verts.astype(np.float64),
+        a_faces.astype(np.int32)
+    )
+
+    # Compute barycentric coordinates of each closest point within its triangle
+    tri_verts = a_verts[a_faces[face_ids]]  # (N_garment, 3_corners, 3_xyz)
+    v0 = tri_verts[:, 0]
+    v1 = tri_verts[:, 1]
+    v2 = tri_verts[:, 2]
+
+    # Barycentric coords via the standard area method
+    e0 = v1 - v0   # (N, 3)
+    e1 = v2 - v0   # (N, 3)
+    ep = closest_pts - v0  # (N, 3)
+
+    d00 = np.sum(e0 * e0, axis=1)
+    d01 = np.sum(e0 * e1, axis=1)
+    d11 = np.sum(e1 * e1, axis=1)
+    dp0 = np.sum(ep * e0, axis=1)
+    dp1 = np.sum(ep * e1, axis=1)
+
+    denom = d00 * d11 - d01 * d01
+    denom = np.maximum(denom, 1e-12)  # avoid division by zero for degenerate triangles
+
+    bary_u = (d11 * dp0 - d01 * dp1) / denom  # weight for v1
+    bary_v = (d00 * dp1 - d01 * dp0) / denom  # weight for v2
+    bary_w = 1.0 - bary_u - bary_v             # weight for v0
+
+    # Evaluate the same barycentric coords on the custom-pose triangles
+    c_tri_verts = c_verts[a_faces[face_ids]]  # same face topology
+    custom_pts = (bary_w[:, None] * c_tri_verts[:, 0] +
+                  bary_u[:, None] * c_tri_verts[:, 1] +
+                  bary_v[:, None] * c_tri_verts[:, 2])
+
+    # Displacement = how the closest surface point moved from A-pose to custom pose
+    garment_disp = custom_pts - closest_pts
+    g_verts_reposed = g_verts + garment_disp
+
+    # Write reposed OBJ by replacing vertex positions (preserves UVs, materials, etc.)
+    reposed_path = sim_folder / sim_path.name.replace('_sim.obj', '_reposed.obj')
+    with open(sim_path, 'r') as f:
+        lines = f.readlines()
+
+    v_idx = 0
+    with open(reposed_path, 'w') as f:
+        for line in lines:
+            if line.startswith('v ') and not line.startswith('vt') and not line.startswith('vn'):
+                v = g_verts_reposed[v_idx]
+                f.write(f'v {v[0]} {v[1]} {v[2]}\n')
+                v_idx += 1
+            else:
+                f.write(line)
+
+    # Also overwrite the _sim.obj so the built-in renderer picks it up
+    import shutil
+    shutil.copy(reposed_path, sim_path)
+
+    print(f'  Reposed garment saved to {reposed_path}')
+    print(f'  Max displacement: {np.abs(garment_disp).max():.2f} cm')
+    print(f'  Mean displacement: {np.linalg.norm(garment_disp, axis=1).mean():.2f} cm')
+    return reposed_path
+
+
+def render_reposed(sim_folder,
+                   custom_obj='./assets/bodies/global_men_size50_custom_pose.obj'):
+    """Re-render the simulation output using the custom-pose body and reposed garment."""
+    from pygarment.meshgen.render.pythonrender import render_images
+    from pygarment.meshgen.sim_config import PathCofig
+
+    sim_folder = Path(sim_folder)
+    sim_config_path = './assets/Sim_props/tshirt_sim_props.yaml'
+    props = Properties(sim_config_path)
+    render_props = props['render']['config']
+
+    # Load custom-pose body (same transforms as simulation: scale to cm, y-shift)
+    body_v, body_f = _load_body_cm(custom_obj)
+
+    # Build a minimal PathCofig-like object with the paths the renderer needs
+    # The renderer uses paths.g_sim and paths.render_path(side)
+    spec_files = list(sim_folder.glob('*_specification.json'))
+    sim_files = list(sim_folder.glob('*_sim.obj'))
+    if not sim_files:
+        print(f'  No *_sim.obj in {sim_folder}')
         return
 
-    garment_path = sim_files[0]
+    # Create a simple namespace to satisfy paths.g_sim and paths.render_path()
+    class RenderPaths:
+        def __init__(self, sim_path, out_dir, sim_tag):
+            self.g_sim = sim_path
+            self.out_el = out_dir
+            self.sim_tag = sim_tag
+        def render_path(self, camera_name=''):
+            fname = f'{self.sim_tag}_render_{camera_name}.png' if camera_name else f'{self.sim_tag}_render.png'
+            return self.out_el / fname
+
+    sim_path = sim_files[0]
+    sim_tag = sim_path.stem.replace('_sim', '')
+    paths = RenderPaths(sim_path, sim_folder, sim_tag)
+
+    render_images(paths, body_v, body_f, render_props)
+    print(f'  Renders saved to {sim_folder}')
+
+
+def save_combined_mesh(sim_folder,
+                       body_obj_path=f'./assets/bodies/{CUSTOM_BODY_NAME}.obj',
+                       garment_suffix='_reposed.obj'):
+    """Create combined body + garment mesh."""
+    import trimesh
+
+    sim_folder = Path(sim_folder)
+
+    # Use reposed garment if available, fall back to sim
+    garment_files = list(sim_folder.glob(f'*{garment_suffix}'))
+    if not garment_files:
+        garment_files = list(sim_folder.glob('*_sim.obj'))
+    if not garment_files:
+        print(f'  No garment mesh found in {sim_folder}')
+        return
+
+    garment_path = garment_files[0]
     garment = trimesh.load(str(garment_path), process=False)
     body = trimesh.load(str(body_obj_path), process=False)
 
@@ -262,7 +424,8 @@ if __name__ == '__main__':
     print("  Production: CALITEE_International Production")
     print("  Body: GLOBAL MEN size 50")
     print("  Garment sizes: 48, 50, 52")
-    print(f"  Simulation body mesh: {BODY_NAME} (custom SMPL, 181cm)")
+    print(f"  Simulation body: {APOSE_BODY_NAME} (A-pose)")
+    print(f"  Target pose body: {CUSTOM_BODY_NAME}")
     print("=" * 60)
 
     # Step 1: Generate patterns for all sizes using built-in system
@@ -272,15 +435,15 @@ if __name__ == '__main__':
         prod = PRODUCTION_DATA[size]
         print(f'\nSize {size}: Bust={prod["Bust"]}, Arm_Length={prod["Arm_Length"]}, '
               f'Nape_to_Waist={prod["Nape_to_Waist"]}')
-        design = map_production_to_design(prod, BODY_YAML)
+        design = map_production_to_design(prod, APOSE_BODY_YAML)
         print(f'  Design: width={design["shirt"]["width"]["v"]:.3f}, '
               f'length={design["shirt"]["length"]["v"]:.3f}, '
               f'sleeve_length={design["sleeve"]["length"]["v"]:.3f}')
-        folder, name = generate_pattern(size, design, BODY_YAML, output_base)
+        folder, name = generate_pattern(size, design, APOSE_BODY_YAML, output_base)
         generated.append((folder, name, size))
 
-    # Step 2: Simulate each pattern
-    print("\n--- Step 2: Running simulations ---")
+    # Step 2: Simulate each pattern on A-pose body
+    print("\n--- Step 2: Running simulations (A-pose) ---")
     sim_results = []
     for folder, name, size in generated:
         print(f'\nSimulating size {size}...')
@@ -293,8 +456,20 @@ if __name__ == '__main__':
             import traceback
             traceback.print_exc()
 
-    # Step 3: Create combined meshes
-    print("\n--- Step 3: Creating combined body+garment meshes ---")
+    # Step 3: Repose garments from A-pose to custom pose and re-render
+    print("\n--- Step 3: Reposing garments to custom pose ---")
+    for sim_folder, size in sim_results:
+        print(f'\nReposing size {size}...')
+        try:
+            repose_garment(sim_folder)
+            render_reposed(sim_folder)
+        except Exception as e:
+            print(f'  Reposing/render failed for size {size}: {e}')
+            import traceback
+            traceback.print_exc()
+
+    # Step 4: Create combined meshes
+    print("\n--- Step 4: Creating combined body+garment meshes ---")
     for sim_folder, size in sim_results:
         print(f'\nCombining size {size}...')
         try:
