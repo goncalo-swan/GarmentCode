@@ -70,8 +70,8 @@ class StraightWB(BaseBand):
 
         # For rise > 1.0 (high-rise), offset waistband above natural waist
         rise_offset = max(0, (self.rise - 1.0)) * body['hips_line']
-        self.front.translate_by([0, body['_waist_level'] + rise_offset, 20])
-        self.back.translate_by([0, body['_waist_level'] + rise_offset, -15])
+        self.front.translate_by([0, body['_waist_level'] + rise_offset + 15, 20])
+        self.back.translate_by([0, body['_waist_level'] + rise_offset + 15, -15])
         
         self.stitching_rules = pyg.Stitches(
             (self.front.interfaces['right'], self.back.interfaces['right']),

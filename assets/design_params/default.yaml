@@ -835,6 +835,18 @@ design:
       - 1.2
       type: float
       default_prob: 0.3
+    thigh:
+      v: 1.0
+      range:
+      - 0.8
+      - 1.5
+      type: float
+    knee:
+      v: 1.0
+      range:
+      - 0.8
+      - 1.5
+      type: float
     rise:
       v: 1.0
       range:

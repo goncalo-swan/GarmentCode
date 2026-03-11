@@ -706,7 +706,14 @@ class BoxMesh(wrappers.VisPattern):
         if isinstance(edge.curve, svgpath.QuadraticBezier) or isinstance(edge.curve, svgpath.CubicBezier):
              # to achieve equal spread along bezier curve
             curve_lengths = np.linspace(0,1,n) * edge.curve.length()
-            t_vals = [edge.curve.ilength(c_len) for c_len in curve_lengths]
+            t_vals_new = []
+            for c_len in curve_lengths:
+                try:
+                    t_vals_new.append(edge.curve.ilength(c_len))
+                except Exception:
+                    # Fallback: approximate t from arc-length fraction
+                    t_vals_new.append(c_len / edge.curve.length() if edge.curve.length() > 0 else 0.0)
+            t_vals = t_vals_new
 
         ts = t_vals[1:(n - 1)]  # remove start and end from "inside vertices"
         if isinstance(edge.curve, svgpath.Arc):

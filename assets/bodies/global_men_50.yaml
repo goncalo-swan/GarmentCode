@@ -22,6 +22,9 @@ body:
   waist_back_width: 40.8
   hip_back_width: 52.5
   leg_circ: 57.6
+  thigh_circ: 62.0
+  knee_circ: 42.0
+  crotch_to_knee: 35.0
   hip_inclination: 6.7
   waist_over_bust_line: 40.6
   vert_bust_line: 21.1

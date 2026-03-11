@@ -31,3 +31,8 @@ output*
 
 # Nicegui
 .nicegui
+
+assets/img
+assets/bodies
+*.DS_Store
+.DS_Store

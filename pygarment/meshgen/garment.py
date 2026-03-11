@@ -346,7 +346,7 @@ class Cloth:
 
     def _sim_frame_with_substeps(self):
         """Basic scheme for simulating a frame update"""
-        
+
         wp.sim.collide(self.model, self.state_0, self.sim_dt * self.sim_substeps)  # Generates contact points for the particles and rigid bodies
         # in the model, to be used in the contact dynamics kernel of the integrator
         # launches kernels

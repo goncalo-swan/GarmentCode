@@ -456,9 +456,11 @@ class ProductionToDesign:
         width_v = np.clip(width_v, 0.5, 1.5)
 
         # pants.length.v is relative to leg_length
+        # Upper bound of 1.2 allows full-length pants to reach the floor
+        # (length_v > 1.0 means the hem extends below the body's hip datum)
         leg_length = b['_leg_length']
         length_v = garment['length'] / leg_length
-        length_v = np.clip(length_v, 0.2, 0.95)
+        length_v = np.clip(length_v, 0.2, 1.2)
 
         # Flare: solve for flare_v from target leg opening circumference
         # With width_v scaling both hips and crotch_ext:
@@ -474,6 +476,24 @@ class ProductionToDesign:
         rise_v = garment.get('rise', 1.0)
         rise_v = np.clip(rise_v, 0.5, 1.5)
 
+        # Thigh/knee: multiplier on body circumference at those levels
+        thigh_v = 1.0
+        if garment.get('thigh_circumference') and 'thigh_circ' in b:
+            thigh_v = float(np.clip(
+                garment['thigh_circumference'] / b['thigh_circ'], 0.5, 2.5))
+        knee_v = 1.0
+        if garment.get('knee_circumference') and 'knee_circ' in b:
+            knee_v = float(np.clip(
+                garment['knee_circumference'] / b['knee_circ'], 0.5, 2.5))
+
+        # Crotch-to-knee distance override from production data (cm)
+        crotch_to_knee = garment.get('crotch_to_knee')
+
+        # Waistband circumference from production data.
+        # waist.v is a multiplier on body.waist; values > 1.0 make the WB larger
+        # than the body's natural waist, so the pants settle lower in simulation.
+        waist_v = garment['waist_circumference'] / b['waist']
+
         design = {
             'meta': {
                 'upper': {'v': None},
@@ -481,13 +501,16 @@ class ProductionToDesign:
                 'bottom': {'v': 'Pants'},
             },
             'waistband': {
-                'waist': {'v': 1.0},
+                'waist': {'v': float(waist_v)},
                 'width': {'v': 0.2},
             },
             'pants': {
                 'length': {'v': float(length_v)},
                 'width': {'v': float(width_v)},
                 'flare': {'v': float(flare_v)},
+                'thigh': {'v': float(thigh_v)},
+                'knee': {'v': float(knee_v)},
+                'crotch_to_knee': {'v': float(crotch_to_knee) if crotch_to_knee else None},
                 'rise': {'v': float(rise_v)},
                 'cuff': {
                     'type': {'v': None},
