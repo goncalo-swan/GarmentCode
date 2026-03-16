@@ -1,5 +1,5 @@
 """
-Run pants pipeline for f_muses bodies (nina, carol, mayke, simone).
+Run pants pipeline for muses bodies (nina, carol, mayke, simone).
 Each body runs on 3 sizes: one below, matching, one above.
 """
 import os
@@ -11,10 +11,10 @@ from pygarment.data_config import Properties
 
 
 BODIES = {
-    'nina':   {'yaml': './assets/bodies/f_muses/nina.yaml',   'name': 'f_muses/nina',   'sizes': [44, 46, 48]},
-    'carol':  {'yaml': './assets/bodies/f_muses/carol.yaml',  'name': 'f_muses/carol',  'sizes': [38, 40, 42]},
-    'mayke':  {'yaml': './assets/bodies/f_muses/mayke.yaml',  'name': 'f_muses/mayke',  'sizes': [36, 38, 40]},
-    'simone': {'yaml': './assets/bodies/f_muses/simone.yaml', 'name': 'f_muses/simone', 'sizes': [40, 42, 44]},
+    'nina':   {'yaml': './assets/bodies/muses/nina.yaml',   'name': 'muses/nina',   'sizes': [44, 46, 48]},
+    'carol':  {'yaml': './assets/bodies/muses/carol.yaml',  'name': 'muses/carol',  'sizes': [38, 40, 42]},
+    'mayke':  {'yaml': './assets/bodies/muses/mayke.yaml',  'name': 'muses/mayke',  'sizes': [36, 38, 40]},
+    'simone': {'yaml': './assets/bodies/muses/simone.yaml', 'name': 'muses/simone', 'sizes': [40, 42, 44]},
 }
 
 
@@ -32,6 +32,7 @@ if __name__ == '__main__':
         rcp.BODY_NAME = body_name
 
         body_obj_path = f'./assets/bodies/{body_name}.obj'
+        rcp.normalize_body_mesh(body_obj_path)
 
         print("\n" + "=" * 70)
         print(f"  {person.upper()} — body: {body_name}, sizes: {sizes}")

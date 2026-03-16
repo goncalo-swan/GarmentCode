@@ -169,6 +169,11 @@ class SimConfig:
             'attachment_damping',
             []
         )
+        self.attachment_target_y = self.get_sim_props_value(
+            sim_props_option,
+            'attachment_target_y',
+            None
+        )
         if not self.attachment_frames or not self.attachment_labels:
             self.enable_attachment_constraint = False
 

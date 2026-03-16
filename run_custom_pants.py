@@ -35,11 +35,31 @@ from pygarment.data_config import Properties
 from production_to_design import ProductionToDesign
 
 
+def normalize_body_mesh(obj_path):
+    """Ensure body mesh has feet at Y=0.
+
+    The simulation shifts both body and cloth by the same Y offset to place
+    the body on the ground. If the body mesh doesn't start at Y=0, the cloth
+    ends up displaced from the body. This normalizes the mesh in-place.
+    """
+    import trimesh
+    obj_path = Path(obj_path)
+    if not obj_path.exists():
+        return
+    mesh = trimesh.load(str(obj_path), process=False)
+    min_y = mesh.vertices[:, 1].min()
+    if abs(min_y) < 0.001:
+        return
+    print(f'  Normalizing body mesh {obj_path.name}: shifting Y by {-min_y:.4f}')
+    mesh.vertices[:, 1] -= min_y
+    mesh.export(str(obj_path))
+
+
 # ============================================================
 # Production measurements per garment size (full circumference, cm)
 # ============================================================
 GARMENT_SIZES = [32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54]
-SIZES_TO_RUN  = [38]   # subset to generate/simulate; set to GARMENT_SIZES for all
+SIZES_TO_RUN  = [48, 50, 52]   # subset to generate/simulate; set to GARMENT_SIZES for all
 
 PRODUCTION_DATA = {
     32: {
@@ -878,16 +898,36 @@ def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
     return rise_v, front_fraction
 
 
-def map_production_to_design(prod, body_yaml_path):
-    """Map production measurements to GarmentCode design parameters."""
+def map_production_to_design(prod, body_yaml_path, elastic_waistband=False):
+    """Map production measurements to GarmentCode design parameters.
+
+    Args:
+        prod: dict of production measurements for a single size.
+        body_yaml_path: path to the body YAML file.
+        elastic_waistband: if True, clamp the waistband to be no larger than
+            the body's waist. This ensures the gathered waistband always
+            creates compression (elastic grip) against the body.
+    """
     mapper = ProductionToDesign(body_yaml_path)
     body = mapper.body
 
     # Panel length ≈ inseam + crotch_hip_diff
     panel_length = prod['Inseam'] + body['crotch_hip_diff']
 
+    # For elastic waistbands: the production waist is the relaxed (unstretched)
+    # measurement. When worn, the elastic stretches to grip the body but remains
+    # under tension (pulling inward). We simulate this by setting the waistband
+    # slightly smaller than body waist — the gathering creates compression that
+    # mimics elastic tension. The ease factor controls how much tension:
+    #   0.95 = 5% smaller than body → moderate elastic grip
+    #   prod >= body → oversized, elastic not stretched, use prod waist (pants sag)
+    ELASTIC_EASE = 0.95
+    waist_circ = prod['Waist']
+    if elastic_waistband and waist_circ < body['waist']:
+        waist_circ = body['waist'] * ELASTIC_EASE
+
     garment_measurements = {
-        'waist_circumference': prod['Waist'],
+        'waist_circumference': waist_circ,
         'hip_circumference': prod['Low_Hip'],
         'length': panel_length,
         'leg_opening': prod['Ankle'],
@@ -913,15 +953,25 @@ def map_production_to_design(prod, body_yaml_path):
     return design
 
 
-def generate_pattern(size, design, body_yaml_path, output_base, name_prefix=''):
+def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
+                     garment_prefix='hm_pants', reposition_panels=False,
+                     ankle_clearance_pct=0.05):
     """Generate pattern using built-in MetaGarment system."""
     from assets.garment_programs.meta_garment import MetaGarment
     from assets.bodies.body_params import BodyParameters
 
-    garment_name = f'{name_prefix}hm_pants_size{size}' if name_prefix else f'hm_pants_size{size}'
+    garment_name = f'{name_prefix}{garment_prefix}_size{size}'
 
     body = BodyParameters(body_yaml_path)
     garment = MetaGarment(garment_name, body, design)
+
+    # Ensure the garment starts above the ankle so that panels stitch
+    # together outside the body during the zero-gravity phase.
+    ankle_clearance = body['height'] * ankle_clearance_pct
+    bbox_min, _ = garment.bbox3D()
+    if bbox_min[1] < ankle_clearance:
+        garment.translate_by([0, ankle_clearance - bbox_min[1], 0])
+
     pattern = garment.assembly()
 
     if garment.is_self_intersecting():
@@ -937,18 +987,78 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix=''):
         with_printable=True
     )
 
+    # --- Post-process: reposition panels for reliable stitching ---
+    # Only needed for garments where the default 45cm Z gap causes back
+    # panels to wrap outside the legs (e.g. oversized sweatpants).
+    # Enabled via reposition_panels=True / config flag reposition_panels.
+    if reposition_panels:
+        spec_files = list(Path(folder).glob('*_specification.json'))
+        if spec_files:
+            with open(spec_files[0]) as f:
+                spec = json.load(f)
+            panels = spec.get('pattern', {}).get('panels', {})
+            # Build front-panel X lookup
+            front_x = {}
+            for pname, panel in panels.items():
+                if 'pant_f' in pname:
+                    front_x[pname] = panel['translation'][0]
+            modified = False
+            for pname, panel in panels.items():
+                if 'pant_f' in pname:
+                    old_z = panel['translation'][2]
+                    panel['translation'][2] = 10
+                    print(f'    {pname}: Z {old_z} -> 10')
+                    modified = True
+                elif 'pant_b' in pname:
+                    fkey = pname.replace('pant_b', 'pant_f')
+                    fx = front_x.get(fkey, panel['translation'][0])
+                    old_x = panel['translation'][0]
+                    new_x = old_x + 0.5 * (fx - old_x)
+                    old_z = panel['translation'][2]
+                    panel['translation'][0] = new_x
+                    panel['translation'][2] = -5
+                    print(f'    {pname}: X {old_x:.1f}->{new_x:.1f}, Z {old_z}->{-5}')
+                    modified = True
+                elif pname == 'wb_front':
+                    old_z = panel['translation'][2]
+                    panel['translation'][2] = 10
+                    print(f'    {pname}: Z {old_z} -> 10')
+                    modified = True
+                elif pname == 'wb_back':
+                    old_z = panel['translation'][2]
+                    panel['translation'][2] = -5
+                    print(f'    {pname}: Z {old_z} -> -5')
+                    modified = True
+            if modified:
+                with open(spec_files[0], 'w') as f:
+                    json.dump(spec, f, indent=2)
+
     print(f'  Pattern generated: {garment_name} -> {folder}')
     return Path(folder), garment_name
 
 
-def simulate_pattern(pattern_folder, garment_name, output_base):
-    """Run physics simulation on A-pose body."""
+def simulate_pattern(pattern_folder, garment_name, output_base,
+                     body_name=None, sim_props=None):
+    """Run physics simulation on A-pose body.
+
+    Args:
+        sim_props: dict with sim/render keys (inlined sim props from garment config),
+                   or a file path string for backward compatibility.
+    """
+    if body_name is None:
+        body_name = BODY_NAME
+
     from pygarment.meshgen.boxmeshgen import BoxMesh
     from pygarment.meshgen.simulation import run_sim
     from pygarment.meshgen.sim_config import PathCofig
 
-    sim_config_path = './assets/Sim_props/pants_sim_props.yaml'
-    props = Properties(sim_config_path)
+    if sim_props is None:
+        props = Properties('./assets/Sim_props/default_sim_props.yaml')
+    elif isinstance(sim_props, str):
+        props = Properties(sim_props)
+    else:
+        props = Properties()
+        props.properties = dict(sim_props)
     props.set_section_stats(
         'sim', fails={}, sim_time={}, spf={},
         fin_frame={}, body_collisions={}, self_collisions={}
@@ -966,7 +1076,7 @@ def simulate_pattern(pattern_folder, garment_name, output_base):
         in_element_path=pattern_folder,
         out_path=output_base,
         in_name=in_name,
-        body_name=BODY_NAME,
+        body_name=body_name,
         smpl_body=True,
         add_timestamp=True
     )
@@ -990,7 +1100,10 @@ def simulate_pattern(pattern_folder, garment_name, output_base):
         save_v_norms=False,
         store_usd=False,
         optimize_storage=False,
-        verbose=False
+        verbose=False,
+        save_sim_video=True,
+        video_frame_interval=10,
+        video_fps=30,
     )
 
     props.serialize(paths.element_sim_props)
@@ -1073,7 +1186,7 @@ def _free_edges(panels, stitches, panel_name):
     ]
 
 
-def verify_measurements(spec_path, size, prod):
+def verify_measurements(spec_path, size, prod, body_yaml=None, elastic_waistband=False):
     """Extract pants measurements from spec JSON and compare to production targets.
 
     Panel structure (from stitching analysis):
@@ -1198,7 +1311,9 @@ def verify_measurements(spec_path, size, prod):
     results['Front Rise'] = _rise_seam_arc_length(panels, stitches, 'pant_f_l', 'pant_f_r')
     results['Back Rise']  = _rise_seam_arc_length(panels, stitches, 'pant_b_l', 'pant_b_r')
 
-    with open(BODY_YAML) as f:
+    if body_yaml is None:
+        body_yaml = BODY_YAML
+    with open(body_yaml) as f:
         body_data = yaml.safe_load(f)['body']
 
     # --- Print results ---
@@ -1224,6 +1339,9 @@ def verify_measurements(spec_path, size, prod):
     for meas_key, prod_key, note in checks:
         measured = results.get(meas_key)
         target = prod.get(prod_key)
+        # For elastic waistband: when prod < body, pattern uses body waist * ease
+        if elastic_waistband and meas_key == 'Waist' and prod['Waist'] < body_data.get('waist', 0):
+            target = body_data['waist'] * 0.95
         if target is None:
             continue
         if measured is not None:
@@ -1236,15 +1354,28 @@ def verify_measurements(spec_path, size, prod):
             print(f'    {note}')
 
     waist_body = body_data.get('waist', '?')
-    print(f'\n  Note: Waist target ({prod["Waist"]}) is production spec; '
-          f'body waist is {waist_body}cm (elastic/stretch fit).')
+    if elastic_waistband and prod['Waist'] < float(waist_body):
+        elastic_waist = float(waist_body) * 0.95
+        print(f'\n  Note: Elastic waistband — pattern waist {elastic_waist:.1f}cm '
+              f'(body {waist_body}cm × 0.95 ease). '
+              f'Production relaxed waist is {prod["Waist"]}cm.')
+    elif elastic_waistband:
+        print(f'\n  Note: Elastic waistband — production waist ({prod["Waist"]}cm) >= body waist '
+              f'({waist_body}cm), oversized fit (elastic not stretched).')
+    else:
+        print(f'\n  Note: Waist target ({prod["Waist"]}) is production spec; '
+              f'body waist is {waist_body}cm (elastic/stretch fit).')
 
     return results
 
 
-def save_combined_mesh(sim_folder,
-                       body_obj_path=f'./assets/bodies/{BODY_NAME}.obj'):
+def save_combined_mesh(sim_folder, body_obj_path=None, body_name=None):
     """Create combined body + garment mesh."""
+    if body_name is None:
+        body_name = BODY_NAME
+    if body_obj_path is None:
+        body_obj_path = f'./assets/bodies/{body_name}.obj'
+
     import trimesh
 
     sim_folder = Path(sim_folder)
@@ -1310,6 +1441,8 @@ if __name__ == '__main__':
     print(f"  Simulation body: {BODY_NAME} (A-pose)")
     print(f"  GPU: CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
     print("=" * 60)
+
+    normalize_body_mesh(f'./assets/bodies/{BODY_NAME}.obj')
 
     # Step 1: Generate patterns for all sizes
     print("\n--- Step 1: Generating patterns ---")

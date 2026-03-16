@@ -175,8 +175,33 @@ class Cloth:
             self.body_vertices_device_buffer = wp.array(body_vertices, dtype=wp.vec3, device=self.device)
             self.v_body = body_vertices
         
+        # Shrink foot vertices during zero-gravity so the foot does not
+        # block the Z-axis convergence of front/back panels.  Foot verts
+        # are blended towards the ankle centre (95% blend to keep valid
+        # triangles); they are restored when gravity activates (see update()).
+        foot_y_threshold = body_vertices[:, 1].max() * 0.06  # ~6% of height ≈ foot top
+        self._foot_mask = body_vertices[:, 1] < foot_y_threshold
+        self._body_verts_original = body_vertices.copy()
+        if self._foot_mask.any():
+            # Ankle ring: vertices just above the foot
+            ankle_band = (body_vertices[:, 1] >= foot_y_threshold) & \
+                         (body_vertices[:, 1] < foot_y_threshold * 1.5)
+            if ankle_band.any():
+                ankle_center = body_vertices[ankle_band].mean(axis=0)
+            else:
+                ankle_center = body_vertices[~self._foot_mask].mean(axis=0)
+            # Shrink foot towards ankle center (keep 5% spread for valid tris)
+            body_vertices = body_vertices.copy()
+            body_vertices[self._foot_mask] = (
+                ankle_center + 0.05 * (body_vertices[self._foot_mask] - ankle_center)
+            )
+
+        if not hasattr(self, 'body_vertices_device_buffer'):
+            self.body_vertices_device_buffer = wp.array(
+                body_vertices, dtype=wp.vec3, device=self.device)
+
         self.body_mesh = wp.sim.Mesh(body_vertices, body_indices)
-        
+
         body_pos = wp.vec3(0.0, 0, 0.0)
         body_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.degrees(0.0))
 
@@ -275,13 +300,11 @@ class Cloth:
                 constaint_verts = vertex_labels[attach_label]
                 if attach_label == 'lower_interface':
                     lables_present = True
-                    if '_waist_level' in body_dict:
-                        waist_level = body_dict['_waist_level']
-                    else:
-                        waist_level = body_dict['height'] - body_dict['head_l'] - body_dict['waist_line']
+                    target_y = self._resolve_attachment_target_y(
+                        config.attachment_target_y, body_dict)
                     builder.add_attachment(
-                        constaint_verts, 
-                        wp.vec3(0, waist_level, 0),
+                        constaint_verts,
+                        wp.vec3(0, target_y, 0),
                         wp.vec3(0., 1., 0.),    # Vertical attachment
                         stiffness = config.attachment_stiffness[i],
                         damping = config.attachment_damping[i]
@@ -335,6 +358,41 @@ class Cloth:
                   'are not present. Attachment is turned off'
                 )
 
+    @staticmethod
+    def _resolve_attachment_target_y(target, body_dict):
+        """Resolve attachment target Y from config value and body measurements.
+
+        Args:
+            target: None (use waist), a numeric value, or a named landmark string.
+            body_dict: body measurement dict from YAML.
+
+        Supported landmarks:
+            'waist'    — natural waist level
+            'hip_bone' — iliac crest, ~36% of the way from waist to full hip
+            'hip'      — full hip (widest point)
+        """
+        if '_waist_level' in body_dict:
+            waist_level = body_dict['_waist_level']
+        else:
+            waist_level = body_dict['height'] - body_dict['head_l'] - body_dict['waist_line']
+
+        if target is None or target == 'waist':
+            return waist_level
+
+        if isinstance(target, (int, float)):
+            return float(target)
+
+        hips_line = body_dict.get('hips_line', 0)
+
+        if target == 'hip_bone':
+            return waist_level - hips_line * 0.36
+        elif target == 'hip':
+            return waist_level - hips_line
+        else:
+            raise ValueError(
+                f'Unknown attachment target "{target}". '
+                'Use a number, or one of: waist, hip_bone, hip')
+
     def _load_panel_labels(self):
         pattern = BasicPattern(self.paths.g_specs)
 
@@ -376,6 +434,10 @@ class Cloth:
                 self.model.particle_grid.build(self.state_0.particle_q, self.model.particle_max_radius * 2.0)
             if frame == self.zero_gravity_steps:
                 self.model.gravity = np.array((0.0, -9.81, 0.0))
+                # Restore original body (with feet) now that panels have
+                # converged into closed tubes during zero-gravity.
+                if hasattr(self, '_body_verts_original') and self._foot_mask.any():
+                    self._restore_body_feet()
                 if self.sim_use_graph:
                     self.create_graph()
             if self.enable_body_smoothing and frame in self.body_smoothing_frames:
@@ -399,6 +461,21 @@ class Cloth:
             # NOTE Makes a copy if particle_q device is not CPU
             self.current_verts = wp.array.numpy(self.state_0.particle_q)  
             
+    def _restore_body_feet(self):
+        """Restore original body vertices (with feet) after zero-gravity."""
+        body_vertices = self._body_verts_original
+        self.v_body = body_vertices
+        wp.copy(self.body_vertices_device_buffer,
+                wp.array(body_vertices, dtype=wp.vec3, device='cpu', copy=False))
+        wp.launch(
+            kernel=replace_mesh_points,
+            dim=len(body_vertices),
+            inputs=[self.body_mesh.mesh.id,
+                    self.body_vertices_device_buffer],
+            device=self.device
+        )
+        self.body_mesh.mesh.refit()
+
     def update_smooth_body_shape(self):
         body_vertices = self.body_smoothing_vertices_list.pop()
         self.v_body = body_vertices

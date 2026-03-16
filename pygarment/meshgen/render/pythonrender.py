@@ -163,9 +163,9 @@ def load_meshes(paths:PathCofig, body_v, body_f):
     body_mesh.vertices = body_mesh.vertices / 100
     # Color body mesh
     body_material = pyrender.MetallicRoughnessMaterial(
-        baseColorFactor=(0.0, 0.0, 0.0, 1.0),  # RGB color, Alpha
-        metallicFactor=0.658,  # Range: [0.0, 1.0]
-        roughnessFactor=0.5  # Range: [0.0, 1.0]
+        baseColorFactor=(0.5, 0.5, 0.5, 1.0),  # Medium gray body
+        metallicFactor=0.658,
+        roughnessFactor=0.5
     )
     pyrender_body_mesh = pyrender.Mesh.from_trimesh(body_mesh, material=body_material)
 
@@ -188,6 +188,51 @@ def load_meshes(paths:PathCofig, body_v, body_f):
     pyrender_garm_mesh = pyrender.Mesh.from_trimesh(garm_mesh, smooth=True) 
     
     return pyrender_garm_mesh, pyrender_body_mesh
+
+def render_frame_to_array(garment_verts, garment_faces, body_v, body_f, render_props):
+    """Render garment + body from in-memory vertices and return as numpy RGBA array.
+
+    Used for capturing simulation frames for video.
+    """
+    if render_props and 'resolution' in render_props:
+        view_width, view_height = render_props['resolution']
+    else:
+        view_width, view_height = 540, 540
+
+    # Body mesh
+    body_mesh = trimesh.Trimesh(body_v / 100, body_f)
+    body_material = pyrender.MetallicRoughnessMaterial(
+        baseColorFactor=(0.5, 0.5, 0.5, 1.0),  # Medium gray body
+        metallicFactor=0.658,
+        roughnessFactor=0.5
+    )
+    pyrender_body = pyrender.Mesh.from_trimesh(body_mesh, material=body_material)
+
+    # Garment mesh (solid color, no texture needed for video frames)
+    garm_mesh = trimesh.Trimesh(garment_verts / 100, garment_faces)
+    garm_material = pyrender.MetallicRoughnessMaterial(
+        baseColorFactor=(0.12, 0.20, 0.38, 1.0),  # Dark navy garment
+        metallicFactor=0.1,
+        roughnessFactor=0.7,
+        doubleSided=True
+    )
+    pyrender_garm = pyrender.Mesh.from_trimesh(garm_mesh, material=garm_material, smooth=True)
+
+    # Scene
+    scene = pyrender.Scene(bg_color=(0.85, 0.85, 0.85, 1.))
+    scene.add(pyrender_garm)
+    scene.add(pyrender_body)
+
+    camera_location = render_props.get('front_camera_location') if render_props else None
+    create_camera(pyrender, pyrender_body, scene, 'front', camera_location=camera_location)
+    create_lights(scene, intensity=80.)
+
+    renderer = pyrender.OffscreenRenderer(viewport_width=view_width, viewport_height=view_height)
+    color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    renderer.delete()
+
+    return color
+
 
 def render_images(paths: PathCofig, body_v, body_f, render_props):
 

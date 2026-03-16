@@ -462,20 +462,6 @@ class ProductionToDesign:
         length_v = garment['length'] / leg_length
         length_v = np.clip(length_v, 0.2, 1.2)
 
-        # Flare: solve for flare_v from target leg opening circumference
-        # With width_v scaling both hips and crotch_ext:
-        #   leg_opening = (hips/2 + min_ext) * width_v - 4 + leg_circ*(flare_v - 1)
-        # where min_ext = leg_circ - hips/2 + 5, and the -4 comes from the
-        # "magic value" (-2 cm) offset on each panel's inside seam bottom.
-        leg_opening = garment.get('leg_opening', hip_circ * 0.5)
-        min_ext = b['leg_circ'] - b['hips'] / 2 + 5
-        flare_v = (leg_opening - (b['hips'] / 2 + min_ext) * width_v + 4 + b['leg_circ']) / b['leg_circ']
-        flare_v = np.clip(flare_v, 0.3, 1.2)
-
-        # Rise: how high the waistband sits (1.0 = natural waist, >1.0 = high-rise)
-        rise_v = garment.get('rise', 1.0)
-        rise_v = np.clip(rise_v, 0.5, 1.5)
-
         # Thigh/knee: multiplier on body circumference at those levels
         thigh_v = 1.0
         if garment.get('thigh_circumference') and 'thigh_circ' in b:
@@ -485,6 +471,32 @@ class ProductionToDesign:
         if garment.get('knee_circumference') and 'knee_circ' in b:
             knee_v = float(np.clip(
                 garment['knee_circumference'] / b['knee_circ'], 0.5, 2.5))
+
+        # Flare: solve for flare_v from target leg opening circumference
+        # With width_v scaling both hips and crotch_ext:
+        #   leg_opening = (hips/2 + min_ext) * width_v - 4 + leg_circ*(flare_v - 1)
+        # where min_ext = leg_circ - hips/2 + 5, and the -4 comes from the
+        # "magic value" (-2 cm) offset on each panel's inside seam bottom.
+        leg_opening = garment.get('leg_opening', hip_circ * 0.5)
+        min_ext = b['leg_circ'] - b['hips'] / 2 + 5
+        flare_v = (leg_opening - (b['hips'] / 2 + min_ext) * width_v + 4 + b['leg_circ']) / b['leg_circ']
+
+        # Anticipate crotch extension increase from pants.py: when the thigh
+        # circumference exceeds the per-leg crotch width, PantsHalf widens the
+        # crotch extension, which propagates to the ankle via ankle_in_x.
+        # Pre-compensate flare_v so the ankle stays on target.
+        if 'thigh_circ' in b:
+            thigh_circ = b['thigh_circ'] * thigh_v
+            per_leg_crotch = (b['hips'] / 2 + min_ext) * width_v
+            if thigh_circ > per_leg_crotch:
+                crotch_increase = thigh_circ - per_leg_crotch
+                flare_v -= crotch_increase / b['leg_circ']
+
+        flare_v = np.clip(flare_v, 0.3, 1.2)
+
+        # Rise: how high the waistband sits (1.0 = natural waist, >1.0 = high-rise)
+        rise_v = garment.get('rise', 1.0)
+        rise_v = np.clip(rise_v, 0.5, 1.5)
 
         # Crotch-to-knee distance override from production data (cm)
         crotch_to_knee = garment.get('crotch_to_knee')

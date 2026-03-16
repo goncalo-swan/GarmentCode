@@ -108,12 +108,13 @@ def map_production_to_design(prod, body_yaml_path):
     return design
 
 
-def generate_pattern(size, design, body_yaml_path, output_base):
+def generate_pattern(size, design, body_yaml_path, output_base,
+                     garment_prefix='calitee_tshirt'):
     """Generate pattern using built-in MetaGarment system."""
     from assets.garment_programs.meta_garment import MetaGarment
     from assets.bodies.body_params import BodyParameters
 
-    garment_name = f'calitee_tshirt_size{size}'
+    garment_name = f'{garment_prefix}_size{size}'
 
     body = BodyParameters(body_yaml_path)
     garment = MetaGarment(garment_name, body, design)
@@ -136,14 +137,19 @@ def generate_pattern(size, design, body_yaml_path, output_base):
     return Path(folder), garment_name
 
 
-def simulate_pattern(pattern_folder, garment_name, output_base):
+def simulate_pattern(pattern_folder, garment_name, output_base, sim_props=None):
     """Run physics simulation on A-pose body."""
     from pygarment.meshgen.boxmeshgen import BoxMesh
     from pygarment.meshgen.simulation import run_sim
     from pygarment.meshgen.sim_config import PathCofig
 
-    sim_config_path = './assets/Sim_props/tshirt_sim_props.yaml'
-    props = Properties(sim_config_path)
+    if sim_props is None:
+        props = Properties('./assets/Sim_props/default_sim_props.yaml')
+    elif isinstance(sim_props, str):
+        props = Properties(sim_props)
+    else:
+        props = Properties()
+        props.properties = dict(sim_props)
     props.set_section_stats(
         'sim', fails={}, sim_time={}, spf={},
         fin_frame={}, body_collisions={}, self_collisions={}
@@ -307,14 +313,20 @@ def repose_garment(sim_folder,
 
 
 def render_reposed(sim_folder,
-                   custom_obj='./assets/bodies/global_men_size50_custom_pose.obj'):
+                   custom_obj='./assets/bodies/global_men_size50_custom_pose.obj',
+                   sim_props=None):
     """Re-render the simulation output using the custom-pose body and reposed garment."""
     from pygarment.meshgen.render.pythonrender import render_images
     from pygarment.meshgen.sim_config import PathCofig
 
     sim_folder = Path(sim_folder)
-    sim_config_path = './assets/Sim_props/tshirt_sim_props.yaml'
-    props = Properties(sim_config_path)
+    if sim_props is None:
+        props = Properties('./assets/Sim_props/default_sim_props.yaml')
+    elif isinstance(sim_props, str):
+        props = Properties(sim_props)
+    else:
+        props = Properties()
+        props.properties = dict(sim_props)
     render_props = props['render']['config']
 
     # Load custom-pose body (same transforms as simulation: scale to cm, y-shift)

@@ -25,7 +25,7 @@ import trimesh
 import warp as wp
 
 # Custom code
-from pygarment.meshgen.render.pythonrender import render_images
+from pygarment.meshgen.render.pythonrender import render_images, render_frame_to_array
 from pygarment.meshgen.garment import Cloth
 from pygarment.meshgen.sim_config import SimConfig, PathCofig
 
@@ -115,7 +115,16 @@ def _run_frame_with_timeout(garment, frame_timeout, frame_num):
     except TimeoutError as e:
         raise FrameTimeOutError
 
-def sim_frame_sequence(garment, config, store_usd=False, verbose=False):
+def sim_frame_sequence(garment, config, store_usd=False, verbose=False,
+                       video_frames=None, render_props=None, frame_interval=10):
+    """Run simulation frame loop.
+
+    Args:
+        video_frames: if a list is passed, rendered RGBA frames are appended to it
+            every `frame_interval` steps for video generation.
+        render_props: render config dict (needed when video_frames is not None).
+        frame_interval: capture a video frame every N simulation steps.
+    """
 
     # Save initial state
     if store_usd:
@@ -123,13 +132,13 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False):
 
     start_time = time.time()
     for frame in range(0, config.max_sim_steps):
-        
+
         if verbose:
             print(f'\n------ Frame {frame + 1} ------')
         else:
             update_progress(frame, config.max_sim_steps)
 
-        garment.frame = frame 
+        garment.frame = frame
 
         #Run frame and raise FrameTimeOutError if frame takes too long to simulate
 
@@ -138,10 +147,10 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False):
             # No frame time limits
             garment.run_frame()
         else:
-            # NOTE: frame timeouts only work in the main thread of the program. 
+            # NOTE: frame timeouts only work in the main thread of the program.
             # disable frame timeout by passing 'null' as a max_frame_time parameter in config
             _run_frame_with_timeout(
-                garment, 
+                garment,
                 frame_timeout=config.max_frame_time if frame > 0 else config.max_frame_time * 2,
                 frame_num=frame
             )
@@ -149,6 +158,14 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False):
         if verbose:
             num_cloth_cloth_contacts = garment.count_self_intersections()
             print(f'\nSelf-Intersection: {num_cloth_cloth_contacts}')
+
+        # Capture video frame
+        if video_frames is not None and frame % frame_interval == 0:
+            video_frames.append(render_frame_to_array(
+                garment.current_verts, garment.f_cloth,
+                garment.v_body, garment.f_body,
+                render_props
+            ))
 
         if frame >= config.zero_gravity_steps and frame >= config.min_sim_steps:
             static, _ = garment.is_static()
@@ -160,27 +177,61 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False):
             raise SimTimeOutError
         
 
+def save_video(frames, video_path, fps=30):
+    """Save list of RGBA numpy arrays as an MP4 video."""
+    import imageio.v2 as imageio
+
+    if not frames:
+        print("No video frames captured.")
+        return
+
+    # Convert RGBA to RGB for MP4
+    rgb_frames = [f[:, :, :3] for f in frames]
+
+    writer = imageio.get_writer(
+        str(video_path), fps=fps, codec='libx264',
+        output_params=['-pix_fmt', 'yuv420p'],  # broad compatibility
+    )
+    for f in rgb_frames:
+        writer.append_data(f)
+    writer.close()
+    print(f"Simulation video saved: {video_path} ({len(frames)} frames)")
+
+
 def run_sim(
-        cloth_name, props, paths: PathCofig, 
-        save_v_norms=False, store_usd=False, 
+        cloth_name, props, paths: PathCofig,
+        save_v_norms=False, store_usd=False,
         optimize_storage=False,
-        verbose=False): 
+        verbose=False,
+        save_sim_video=False, video_frame_interval=10, video_fps=30):
     """Initialize and run the simulation
-    !! Important !! 
+    !! Important !!
         'store_usd' parameter slows down the simulation to CPU rates because of required CPU-GPU copies and file writes. Use only for debugging
+
+    Args:
+        save_sim_video: if True, render frames during simulation and save as MP4.
+        video_frame_interval: capture a frame every N simulation steps (default 10).
+        video_fps: frames per second in the output video (default 30).
     """
     sim_props = props['sim']
     render_props = props['render']
 
     start_time = time.time()
 
-    config = SimConfig(sim_props['config'])   # Why separate class at all? 
+    config = SimConfig(sim_props['config'])   # Why separate class at all?
     garment = Cloth(cloth_name, config, paths, caching=store_usd)
+
+    video_frames = [] if save_sim_video else None
 
     try:
         print("Simulation..")
-        sim_frame_sequence(garment, config, store_usd, verbose=verbose)
-    
+        sim_frame_sequence(
+            garment, config, store_usd, verbose=verbose,
+            video_frames=video_frames,
+            render_props=render_props['config'] if save_sim_video else None,
+            frame_interval=video_frame_interval,
+        )
+
     except FrameTimeOutError:
         print(f"FrameTimeOutError at frame {garment.frame}")
         props.add_fail('sim', 'frame_timeout', cloth_name)
@@ -248,6 +299,20 @@ def run_sim(
     render_image_time = time.time() - s_time
     render_props['stats']['render_time'][cloth_name] = render_image_time  
     print(f"Rendering {cloth_name} took {render_image_time}s")
+
+    # Save simulation video
+    if video_frames:
+        # Capture final settled state as extra frames for a brief pause at the end
+        final_frame = render_frame_to_array(
+            garment.current_verts, garment.f_cloth,
+            garment.v_body, garment.f_body,
+            render_props['config']
+        )
+        for _ in range(video_fps):  # ~1 second hold on final frame
+            video_frames.append(final_frame)
+
+        video_path = paths.out_el / f'{paths.sim_tag}_simulation.mp4'
+        save_video(video_frames, video_path, fps=video_fps)
 
     if optimize_storage:
         optimize_garment_storage(paths)

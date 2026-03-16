@@ -353,6 +353,18 @@ class PantsHalf(BaseBottoms):
             thigh_circ = body['thigh_circ'] * thigh_v
             knee_circ = body['knee_circ'] * knee_v
 
+            # Ensure crotch extension is wide enough for the thigh.
+            # When thigh_circ > per-leg crotch width, the outseam must
+            # bulge past the hip line, creating a spike. Widen the crotch
+            # extension to match so the outseam stays monotonic.
+            per_leg_crotch = front_hip + back_hip + crotch_extention
+            if thigh_circ > per_leg_crotch:
+                ext_ratio = (front_extention / crotch_extention
+                             if crotch_extention > 0 else 0.5)
+                crotch_extention = thigh_circ - front_hip - back_hip
+                front_extention = crotch_extention * ext_ratio
+                back_extention = crotch_extention - front_extention
+
             # Crotch-to-knee: prefer production override from design, then body YAML
             design_ctk = design.get('crotch_to_knee', {})
             if isinstance(design_ctk, dict) and design_ctk.get('v') is not None:
@@ -407,7 +419,7 @@ class PantsHalf(BaseBottoms):
             knee_width=leg_shape_kwargs.get('front_knee'),
             knee_y=leg_shape_kwargs.get('knee_y'),
             thigh_y=leg_shape_kwargs.get('thigh_y'),
-            ).translate_by([0, body['_waist_level'] + 10 + rise_offset, 25])
+            ).translate_by([0, body['_waist_level'] - 5 + rise_offset, 25])
         self.back = PantPanel(
             f'pant_b_{tag}', body, design,
             length=length,
@@ -423,7 +435,7 @@ class PantsHalf(BaseBottoms):
             knee_width=leg_shape_kwargs.get('back_knee'),
             knee_y=leg_shape_kwargs.get('knee_y'),
             thigh_y=leg_shape_kwargs.get('thigh_y'),
-            ).translate_by([0, body['_waist_level'] + 10 + rise_offset, -20])
+            ).translate_by([0, body['_waist_level'] - 5 + rise_offset, -20])
 
         self.stitching_rules = pyg.Stitches(
             (self.front.interfaces['outside'], self.back.interfaces['outside']),
@@ -465,9 +477,11 @@ class PantsHalf(BaseBottoms):
         self.interfaces = {
             'crotch_f': self.front.interfaces['crotch'],
             'crotch_b': self.back.interfaces['crotch'],
-            'top_f': self.front.interfaces['top'], 
-            'top_b': self.back.interfaces['top'] 
+            'top_f': self.front.interfaces['top'],
+            'top_b': self.back.interfaces['top']
         }
+
+
 
     def length(self):
         if self.design['pants']['cuff']['type']['v']:

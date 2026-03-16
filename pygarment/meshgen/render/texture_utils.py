@@ -141,7 +141,7 @@ def create_UV_island_texture(
         boundary_width=0.3, 
         boundary_color='black',
         dpi=1200,
-        color_alpha=0.65,
+        color_alpha=0.85,
         background_alpha=0.8,
         background_img_path=None,
         background_resolution=5,
@@ -163,11 +163,10 @@ def create_UV_island_texture(
     fig, ax = plt.subplots()
     fig.set_size_inches(width / 100, height / 100)  # width & height are usually given in cm
 
-    # Colors
-    shift = 0.17
+    # Colors — distinct per panel
     divisor = max(5, n_components)
-    cmap = matplotlib.colormaps['twilight']   # copper cool  spring winter twilight  # Using smooth Matplotlib colormaps
-    color_sample = [cmap((1 - shift) * id / divisor) for id in range(divisor)]
+    cmap = matplotlib.colormaps['Set2']   # Distinct, vivid per-panel colors
+    color_sample = [cmap(id % cmap.N / cmap.N) if hasattr(cmap, 'N') else cmap(id / divisor) for id in range(divisor)]
 
     # Background -- garment style
     if background_img_path is not None:
