@@ -5,6 +5,12 @@ design:
       range:
       - FittedShirt
       - Shirt
+      - ButtonDownShirt
+      - FittedButtonDownShirt
+      - Jacket
+      - FittedJacket
+      - Coat
+      - FittedCoat
       - null
       type: select_null
       default_prob: 0.3
@@ -27,6 +33,7 @@ design:
       - SkirtManyPanels
       - PencilSkirt
       - SkirtLevels
+      - Overalls
       - null
       type: select_null
       default_prob: 0.3
@@ -67,13 +74,25 @@ design:
       - 1.3
       type: float
       default_prob: 0.4
-    flare: 
+    flare:
       v: 1.0
-      range: 
+      range:
       - 0.7
       - 1.6
       type: float
       default_prob: 0.4
+    placket_width:
+      v: 2.0
+      range:
+      - 0
+      - 4.0
+      type: float
+    closure:
+      v: 0.0
+      range:
+      - 0.0
+      - 1.0
+      type: float
   collar:
     f_collar:
       v: CircleNeckHalf
@@ -181,6 +200,8 @@ design:
         - Turtle
         - SimpleLapel
         - Hood2Panels
+        - NotchedLapelCollar
+        - PeakLapelCollar
         - null
         type: select_null
         default_prob: 0.6
@@ -196,6 +217,12 @@ design:
         - true
         - false
         type: bool
+      lapel_fold:
+        v: 45
+        range:
+        - 0
+        - 90
+        type: int
       hood_depth: 
         v: 1
         range: 
@@ -895,3 +922,60 @@ design:
         - 1
         - 1.5
         type: float
+  overalls:
+    bib_width:
+      v: 1.0
+      range:
+      - 0.8
+      - 1.0
+      type: float
+    bib_height:
+      v: 0.5
+      range:
+      - 0.3
+      - 0.8
+      type: float
+    strap_width:
+      v: 4
+      range:
+      - 2
+      - 8
+      type: float
+  jacket:
+    placket_width:
+      v: 4.0
+      range:
+      - 2.0
+      - 8.0
+      type: float
+    closure:
+      v: 0.0
+      range:
+      - 0.0
+      - 1.0
+      type: float
+    double_breasted:
+      v: false
+      range:
+      - true
+      - false
+      type: bool
+    lapel_width:
+      v: 6.0
+      range:
+      - 3.0
+      - 12.0
+      type: float
+    lapel_notch_angle:
+      v: 75
+      range:
+      - 45
+      - 90
+      type: int
+  coat:
+    length:
+      v: 2.0
+      range:
+      - 1.5
+      - 3.5
+      type: float

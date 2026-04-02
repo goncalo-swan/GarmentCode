@@ -229,19 +229,32 @@ class SimpleLapel(pyg.Component):
         length_f, length_b = f_collar.length(), b_collar.length()
         height_p = body['height'] - body['head_l'] + depth * 2
         
+        lapel_fold = design['collar']['component'].get('lapel_fold', {}).get('v', 0)
+
         self.front = SimpleLapelPanel(
-            f'{tag}_collar_front', length_f, depth).translate_by(
-            [-depth * 2, height_p, 35])  # TODOLOW This should be related with the bodice panels' placement
+            f'{tag}_collar_front', length_f, depth)
+        if lapel_fold > 0:
+            # Pre-fold: rotate around the collar edge, position against body
+            self.front.set_pivot(self.front.edges[0].start)
+            self.front.rotate_by(R.from_euler('X', -lapel_fold, degrees=True))
+            self.front.translate_by([-depth * 2, height_p, 5])
+        else:
+            self.front.translate_by([-depth * 2, height_p, 35])
 
         if standing:
             self.back = StraightBandPanel(
-                f'{tag}_collar_back', length_b, depth).translate_by(
-                [-length_b / 2, height_p, -10])
+                f'{tag}_collar_back', length_b, depth)
+            if lapel_fold > 0:
+                # Stand the back collar upright
+                self.back.set_pivot(self.back.edges[3].start)
+                self.back.rotate_by(R.from_euler('X', -90, degrees=True))
+                self.back.translate_by([-length_b / 2, height_p, -3])
+            else:
+                self.back.translate_by([-length_b / 2, height_p, -10])
         else:
-            # A curved back panel that follows the collar opening
             rad, angle, _ = b_collar[0].as_radius_angle()
             self.back = CircleArcPanel(
-                f'{tag}_collar_back', rad, depth, angle  
+                f'{tag}_collar_back', rad, depth, angle
             ).translate_by([-length_b, height_p, -10])
             self.back.rotate_by(R.from_euler('XYZ', [90, 45, 0], degrees=True))
 
@@ -249,7 +262,7 @@ class SimpleLapel(pyg.Component):
             self.back.interfaces['right'].set_right_wrong(True)
 
         self.stitching_rules.append((
-            self.front.interfaces['to_collar'], 
+            self.front.interfaces['to_collar'],
             self.back.interfaces['right']
         ))
 
@@ -367,4 +380,135 @@ class Hood2Panels(pyg.Component):
 
     def length(self):
         return self.panel.length()
+
+
+# ------ Outerwear collar types ------
+
+class NotchedLapelPanel(pyg.Panel):
+    """Lapel panel with a notch cutout for jacket collars."""
+    def __init__(self, name, length, max_depth, notch_depth, notch_angle_rad) -> None:
+        super().__init__(name)
+
+        # Main lapel rectangle with notch cut at the top
+        notch_dx = notch_depth * np.sin(notch_angle_rad)
+        notch_dy = notch_depth * np.cos(notch_angle_rad)
+
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [0, 0],                                     # bottom-left (collar junction)
+            [max_depth, 0],                              # bottom-right (front edge)
+            [max_depth, -length],                        # lower-right
+            [max_depth - notch_dx, -length + notch_dy],  # notch point
+            [0, -length + notch_dy + notch_dx * 0.3],    # gorge line end
+            loop=True,
+        )
+
+        self.interfaces = {
+            'to_collar': pyg.Interface(self, self.edges[0]),
+            'to_bodice': pyg.Interface(self, self.edges[1]),
+        }
+
+
+class NotchedLapelCollar(pyg.Component):
+    """Jacket collar with notched lapels.
+
+    Front: NotchedLapelPanel with notch cutout.
+    Back: Standing collar band (same as SimpleLapel).
+    """
+    def __init__(self, tag, body, design) -> None:
+        super().__init__(f'NotchedLapel_{tag}')
+
+        depth = design['collar']['component']['depth']['v']
+        standing = design['collar']['component'].get('lapel_standing', {}).get('v', True)
+
+        # Notch parameters
+        jacket_d = design.get('jacket', {})
+        notch_depth = jacket_d.get('lapel_width', {}).get('v', 6.0) * 0.3
+        notch_angle = np.deg2rad(jacket_d.get('lapel_notch_angle', {}).get('v', 75))
+
+        # Projecting shapes (neckline cuts)
+        collar_type = globals()[design['collar']['f_collar']['v']]
+        f_collar = collar_type(
+            design['collar']['fc_depth']['v'],
+            design['collar']['width']['v'],
+            angle=design['collar']['fc_angle']['v'],
+            flip=design['collar']['f_flip_curve']['v'])
+        b_collar = CircleNeckHalf(
+            design['collar']['bc_depth']['v'],
+            design['collar']['width']['v'])
+
+        self.interfaces = {
+            'front_proj': pyg.Interface(self, f_collar),
+            'back_proj': pyg.Interface(self, b_collar),
+        }
+
+        # Panels
+        length_f, length_b = f_collar.length(), b_collar.length()
+        height_p = body['height'] - body['head_l'] + depth * 2
+
+        lapel_fold = design['collar']['component'].get('lapel_fold', {}).get('v', 0)
+
+        self.front = NotchedLapelPanel(
+            f'{tag}_collar_front', length_f, depth,
+            notch_depth=notch_depth,
+            notch_angle_rad=notch_angle,
+        )
+        if lapel_fold > 0:
+            self.front.set_pivot(self.front.edges[0].start)
+            self.front.rotate_by(R.from_euler('X', -lapel_fold, degrees=True))
+            self.front.translate_by([-depth * 2, height_p, 5])
+        else:
+            self.front.translate_by([-depth * 2, height_p, 35])
+
+        if standing:
+            self.back = StraightBandPanel(
+                f'{tag}_collar_back', length_b, depth)
+            if lapel_fold > 0:
+                self.back.set_pivot(self.back.edges[3].start)
+                self.back.rotate_by(R.from_euler('X', -90, degrees=True))
+                self.back.translate_by([-length_b / 2, height_p, -3])
+            else:
+                self.back.translate_by([-length_b / 2, height_p, -10])
+        else:
+            rad, angle, _ = b_collar[0].as_radius_angle()
+            self.back = CircleArcPanel(
+                f'{tag}_collar_back', rad, depth, angle
+            ).translate_by([-length_b, height_p, -10])
+            self.back.rotate_by(R.from_euler('XYZ', [90, 45, 0], degrees=True))
+
+        if standing:
+            self.back.interfaces['right'].set_right_wrong(True)
+
+        self.stitching_rules.append((
+            self.front.interfaces['to_collar'],
+            self.back.interfaces['right']
+        ))
+
+        self.interfaces.update({
+            'back': self.back.interfaces['left'],
+            'bottom': pyg.Interface.from_multiple(
+                self.front.interfaces['to_bodice'].set_right_wrong(True),
+                self.back.interfaces['bottom'] if standing else self.back.interfaces['top'].set_right_wrong(True),
+            )
+        })
+
+    def length(self):
+        return self.interfaces['back'].edges.length()
+
+
+class PeakLapelCollar(NotchedLapelCollar):
+    """Jacket collar with peak lapels (upward-pointing).
+
+    Same structure as NotchedLapelCollar but with a steeper notch
+    angle that creates upward-pointing peaks.
+    """
+    def __init__(self, tag, body, design) -> None:
+        # Override notch angle to create peak effect
+        design = design.copy() if not isinstance(design, dict) else {**design}
+        jacket_d = design.get('jacket', {})
+        # Force a steep angle for peak lapels (narrower notch, points upward)
+        if 'jacket' not in design:
+            design['jacket'] = {}
+        design['jacket'] = {**jacket_d, 'lapel_notch_angle': {'v': 45}}
+        super().__init__(tag, body, design)
+        self.name = f'PeakLapel_{tag}'
 

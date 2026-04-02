@@ -7,6 +7,8 @@ from assets.garment_programs.skirt_paneled import *
 from assets.garment_programs.skirt_levels import *
 from assets.garment_programs.circle_skirt import *
 from assets.garment_programs.sleeves import *
+from assets.garment_programs.overalls import *
+from assets.garment_programs.outerwear import *
 
 class TotalLengthError(BaseException):
     """Error indicating that the total length of a garment goes beyond 
@@ -44,8 +46,10 @@ class MetaGarment(pyg.Component):
         # Define Lower garment
         if self.lower_name:
             Lower_class = globals()[self.lower_name]
-            # NOTE: full rise for fitted tops
-            Lower = Lower_class(body, design, rise=1. if self.upper_name and 'Fitted' in self.upper_name else None)
+            # Full rise for fitted tops or jumpsuits (upper + pants, no waistband)
+            is_jumpsuit = self.upper_name and 'Pants' in self.lower_name and not self.belt_name
+            force_rise = is_jumpsuit or (self.upper_name and 'Fitted' in self.upper_name)
+            Lower = Lower_class(body, design, rise=1. if force_rise else None)
         else: 
             Lower = None
 

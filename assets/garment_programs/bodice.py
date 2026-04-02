@@ -351,6 +351,21 @@ class BodiceHalf(pyg.Component):
         fc_interface.edges.propagate_label(f'{self.name}_collar')
         bc_interface.edges.propagate_label(f'{self.name}_collar')
 
+        # Label free lapel edges for fold attachment constraint.
+        # Only label edges NOT involved in stitching (to avoid label conflicts).
+        if hasattr(self.collar_comp, 'front'):
+            front_panel = self.collar_comp.front
+            stitched = set()
+            if 'to_collar' in front_panel.interfaces:
+                for e in front_panel.interfaces['to_collar'].edges:
+                    stitched.add(id(e))
+            if 'to_bodice' in front_panel.interfaces:
+                for e in front_panel.interfaces['to_bodice'].edges:
+                    stitched.add(id(e))
+            for e in front_panel.edges:
+                if id(e) not in stitched:
+                    e.label = f'{self.name}_lapel'
+
     def make_strapless(self, body, design):
 
         out_depth = design['sleeve']['connecting_width']['v']
@@ -480,12 +495,139 @@ class Shirt(pyg.Component):
 
 class FittedShirt(Shirt):
     """Creates fitted shirt
-    
+
         NOTE: Separate class is used for selection convenience.
-        Even though most of the processing is the same 
-        (hence implemented with the same components except for panels), 
-        design parametrization differs significantly. 
+        Even though most of the processing is the same
+        (hence implemented with the same components except for panels),
+        design parametrization differs significantly.
         With that, we decided to separate the top level names
     """
+    def __init__(self, body, design) -> None:
+        super().__init__(body, design, fitted=True)
+
+
+class ButtonDownShirt(Shirt):
+    """Upper garment with open front (button-down style).
+
+    The center-front edges are NOT stitched together, creating a
+    front opening. Optional placket_width adds overlap fabric.
+    """
+    def __init__(self, body, design, fitted=False) -> None:
+        name_with_params = f"{self.__class__.__name__}"
+        pyg.Component.__init__(self, name_with_params)
+
+        design = self.eval_dep_params(design)
+
+        self.right = BodiceHalf(f'right', body, design, fitted=fitted)
+        self.left = BodiceHalf(
+            f'left', body,
+            design['left'] if design['left']['enable_asym']['v'] else design,
+            fitted=fitted).mirror()
+
+        # Placket extension — shift center-front edge outward for overlap
+        pw = design['shirt']['placket_width']['v']
+        if pw > 0:
+            for edge in self.right.ftorso.interfaces['inside'].edges:
+                edge.start[0] += pw
+                edge.end[0] += pw
+            for edge in self.left.ftorso.interfaces['inside'].edges:
+                edge.start[0] -= pw
+                edge.end[0] -= pw
+
+        # Back seam — always stitched
+        self.stitching_rules.append((self.right.interfaces['back_in'],
+                                     self.left.interfaces['back_in']))
+
+        # Front closure: 0.0 = fully open, 1.0 = fully closed
+        closure = design['shirt']['closure']['v']
+        if closure >= 1.0:
+            self.stitching_rules.append((self.right.interfaces['front_in'],
+                                         self.left.interfaces['front_in']))
+        elif closure > 0:
+            right_partial = self._partial_front_in(self.right, closure)
+            left_partial = self._partial_front_in(self.left, closure)
+            self.stitching_rules.append((right_partial, left_partial))
+
+        self.interfaces = {
+            'bottom': pyg.Interface.from_multiple(
+                self.right.interfaces['f_bottom'].reverse(),
+                self.left.interfaces['f_bottom'],
+                self.left.interfaces['b_bottom'].reverse(),
+                self.right.interfaces['b_bottom'],)
+        }
+
+    @staticmethod
+    def _partial_front_in(half, closure):
+        """Return an Interface covering the bottom `closure` fraction of front_in.
+
+        Detects edge direction (top→bottom vs bottom→top after mirroring)
+        and always closes from the bottom up.
+        """
+        front_in = half.interfaces['front_in']
+        total_len = front_in.edges.length()
+        target_len = total_len * closure
+
+        # Detect direction: compare Y of first and last vertex
+        first_y = front_in.edges[0].start[1]
+        last_y = front_in.edges[-1].end[1]
+        bottom_is_at_end = first_y > last_y  # top→bottom: bottom at end
+
+        n = len(front_in.edges)
+        collected_edges = []
+        collected_panels = []
+        cumulative = 0
+
+        if bottom_is_at_end:
+            # Walk backward from end (bottom) toward start (top)
+            for i in range(n - 1, -1, -1):
+                edge = front_in.edges[i]
+                edge_len = edge.length()
+                if cumulative + edge_len <= target_len:
+                    collected_edges.insert(0, edge)
+                    collected_panels.insert(0, front_in.panel[i])
+                    cumulative += edge_len
+                else:
+                    remaining = target_len - cumulative
+                    if remaining > 0.1:
+                        frac = remaining / edge_len
+                        parts = edge.subdivide_len([1 - frac, frac])
+                        front_in.panel[i].edges.substitute(edge, parts)
+                        front_in.substitute(edge, parts,
+                            [front_in.panel[i]] * len(parts))
+                        collected_edges.insert(0, parts[1])
+                        collected_panels.insert(0, front_in.panel[i])
+                    break
+        else:
+            # Walk forward from start (bottom) toward end (top)
+            for i in range(n):
+                edge = front_in.edges[i]
+                edge_len = edge.length()
+                if cumulative + edge_len <= target_len:
+                    collected_edges.append(edge)
+                    collected_panels.append(front_in.panel[i])
+                    cumulative += edge_len
+                else:
+                    remaining = target_len - cumulative
+                    if remaining > 0.1:
+                        frac = remaining / edge_len
+                        parts = edge.subdivide_len([frac, 1 - frac])
+                        front_in.panel[i].edges.substitute(edge, parts)
+                        front_in.substitute(edge, parts,
+                            [front_in.panel[i]] * len(parts))
+                        collected_edges.append(parts[0])
+                        collected_panels.append(front_in.panel[i])
+                    break
+
+        if len(collected_edges) == 1:
+            return pyg.Interface(collected_panels[0], collected_edges[0])
+        partial_ints = [pyg.Interface(p, e) for e, p in zip(collected_edges, collected_panels)]
+        return pyg.Interface.from_multiple(*partial_ints)
+
+    def length(self):
+        return self.right.length()
+
+
+class FittedButtonDownShirt(ButtonDownShirt):
+    """Fitted variant of the button-down shirt with darts."""
     def __init__(self, body, design) -> None:
         super().__init__(body, design, fitted=True)

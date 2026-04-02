@@ -344,14 +344,19 @@ class Cloth:
                         stiffness = config.attachment_stiffness[i],
                         damping = config.attachment_damping[i]
                     )
+                elif attach_label in ('right_lapel', 'left_lapel'):
+                    # Lapel labels recognized but no constraint applied —
+                    # the pre-folded geometry + collar attachment + body
+                    # collision handle lapel positioning
+                    lables_present = True
                 elif attach_label == 'strapless_top':
                     lables_present = True
 
-                    # Attach under arm 
+                    # Attach under arm
                     level = body_dict['height'] - body_dict['head_l'] - body_dict['armscye_depth']
                     builder.add_attachment(
-                        constaint_verts, 
-                        wp.vec3(0, level, 0),  
+                        constaint_verts,
+                        wp.vec3(0, level, 0),
                         wp.vec3(0., 1., 0.),    # Vertical attachment
                         stiffness = config.attachment_stiffness[i],
                         damping = config.attachment_damping[i]
