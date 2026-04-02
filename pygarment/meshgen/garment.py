@@ -230,16 +230,29 @@ class Cloth:
                 vert_connectivity=v_connectivity
             )
 
-            # Overall filter that ignored internal geometry
+            # Overall filter that ignores internal geometry (and arms for lower-body garments)
+            body_filter_parts = ['face_internal']
+            has_leg_panels = any(l in ('left_leg', 'right_leg', 'legs') for l in cloth_reference_labels)
+            has_arm_panels = any(l == 'arm' for l in cloth_reference_labels)
+            is_lower_body = has_leg_panels and not has_arm_panels
+            if is_lower_body:
+                body_filter_parts.extend(['left_arm', 'right_arm', 'arms'])
             face_filters.append(assign.create_face_filter(
-                body_vertices, body_indices, body_seg, ['face_internal'], smpl_body=self.paths.use_smpl_seg))
+                body_vertices, body_indices, body_seg, body_filter_parts, smpl_body=self.paths.use_smpl_seg))
             particle_filter = assign.assign_face_filter_points(
-                cloth_reference_labels, 
+                cloth_reference_labels,
                 ['body'],
-                filter_id=1,   
+                filter_id=1,
                 vert_connectivity=v_connectivity,
                 current_vertex_filter=particle_filter
             )
+
+            if is_lower_body:
+                # Assign remaining unfiltered particles (stitch verts) to arm filter
+                # so no part of pants collides with arms
+                for i in range(len(particle_filter)):
+                    if particle_filter[i] == -1:
+                        particle_filter[i] = 0
 
         self.body_shape_index = 0   # Body is the first collider object to be added
         builder.add_shape_mesh(
