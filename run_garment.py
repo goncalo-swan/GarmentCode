@@ -79,6 +79,54 @@ def _apply_collar_fold_rotations(folder):
             json.dump(spec, f, indent=2)
 
 
+def _apply_hood_down(folder):
+    """Tilt hood panels backward so gravity drapes them behind the neck.
+
+    The default hood placement extends upward over the head.  A small
+    X-rotation tilts the panels backward just enough for gravity to
+    pull them off the head during simulation.
+    """
+    import json
+    spec_files = list(folder.glob('*_specification.json'))
+    if not spec_files:
+        return
+    spec_file = spec_files[0]
+    with open(spec_file) as f:
+        spec = json.load(f)
+
+    from scipy.spatial.transform import Rotation as R
+    import numpy as np
+
+    modified = False
+    for pname, panel in spec.get('pattern', {}).get('panels', {}).items():
+        if '_hood' not in pname:
+            continue
+
+        # Build a rotation that tilts the hood top backward (-Z) and
+        # downward (-Y) instead of upward (+Y).
+        # The default Ry(±90°) puts local X→Z, local Y→Y.
+        # We want local Y → (0, -0.5, -0.866) (60° past vertical, behind).
+        is_right = 'right' in pname or pname.startswith('r')
+        sign = 1 if is_right else -1
+
+        # local Z (panel normal) faces outward (±X)
+        col_z = np.array([sign, 0, 0], dtype=float)
+        # local Y (hood height) points backward and down
+        col_y = np.array([0, -0.5, -0.866], dtype=float)
+        # local X = Y × Z
+        col_x = np.cross(col_y, col_z)
+        col_x /= np.linalg.norm(col_x)
+
+        rot_mat = np.column_stack([col_x, col_y, col_z])
+        euler = R.from_matrix(rot_mat).as_euler('XYZ', degrees=True)
+        panel['rotation'] = euler.tolist()
+        modified = True
+
+    if modified:
+        with open(spec_file, 'w') as f:
+            json.dump(spec, f, indent=2)
+
+
 def _deep_merge(base, overrides):
     """Recursively merge overrides into base dict."""
     for key, value in overrides.items():
@@ -186,6 +234,10 @@ def run_pipeline(config):
         # Panels are serialized flat to avoid stitching vertex collapse;
         # rotation must be applied to the spec JSON before mesh generation.
         _apply_collar_fold_rotations(folder)
+
+        # Optionally flip hood panels to hang behind the back.
+        if config.get('hood_down', False):
+            _apply_hood_down(folder)
 
         generated.append((folder, garment_name, size))
 

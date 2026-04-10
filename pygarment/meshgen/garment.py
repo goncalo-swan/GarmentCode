@@ -361,6 +361,20 @@ class Cloth:
                         stiffness=config.attachment_stiffness[i],
                         damping=config.attachment_damping[i]
                     )
+                elif attach_label in ('right_armhole', 'left_armhole'):
+                    lables_present = True
+
+                    # Pin armhole vertices at their initial Y position so
+                    # sleeves stay at the shoulder instead of sliding down.
+                    avg_y = float(np.mean([self.v_cloth_init[v][1]
+                                           for v in constaint_verts]))
+                    builder.add_attachment(
+                        constaint_verts,
+                        wp.vec3(0, avg_y, 0),
+                        wp.vec3(0., 1., 0.),    # Vertical attachment
+                        stiffness=config.attachment_stiffness[i],
+                        damping=config.attachment_damping[i]
+                    )
                 elif attach_label == 'strapless_top':
                     lables_present = True
 
