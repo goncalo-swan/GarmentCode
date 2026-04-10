@@ -200,8 +200,6 @@ design:
         - Turtle
         - SimpleLapel
         - Hood2Panels
-        - NotchedLapelCollar
-        - PeakLapelCollar
         - null
         type: select_null
         default_prob: 0.6

@@ -349,6 +349,18 @@ class Cloth:
                     # the pre-folded geometry + collar attachment + body
                     # collision handle lapel positioning
                     lables_present = True
+                elif attach_label in ('right_fold_line', 'left_fold_line'):
+                    lables_present = True
+                    # Pin fold-line vertices at their initial Y position
+                    avg_y = float(np.mean([self.v_cloth_init[v][1]
+                                           for v in constaint_verts]))
+                    builder.add_attachment(
+                        constaint_verts,
+                        wp.vec3(0, avg_y, 0),
+                        wp.vec3(0., 1., 0.),    # Y-direction constraint
+                        stiffness=config.attachment_stiffness[i],
+                        damping=config.attachment_damping[i]
+                    )
                 elif attach_label == 'strapless_top':
                     lables_present = True
 

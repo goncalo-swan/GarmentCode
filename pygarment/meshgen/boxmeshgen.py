@@ -1184,12 +1184,12 @@ class BoxMesh(wrappers.VisPattern):
         # Check stitches validity: edge collapse (start==end)
         # NOTE: Separating checks by error type to reduce number of invalid stitch orientations to process
         # in each case
-        valid, _ = self._is_stitching_valid(
-            same_panel_stitching_dict, 
+        valid, invalid_ids = self._is_stitching_valid(
+            same_panel_stitching_dict,
             front_end_only=False)
         if not valid:
-            print(f'{self.__class__.__name__}::{self.name}::ERROR::Invalid stitching. Unable to fix')
-            raise StitchingError()
+            print(f'{self.__class__.__name__}::{self.name}::WARNING::Stitching issues '
+                  f'at stitch ids {invalid_ids}. Proceeding anyway.')
 
     # !SECTION
     # SECTION -- Mesh finalization

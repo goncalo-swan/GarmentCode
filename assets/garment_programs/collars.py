@@ -187,16 +187,182 @@ class SimpleLapelPanel(pyg.Panel):
 
         self.edges.append(
             pyg.CurveEdge(
-                self.edges[-1].end, 
-                self.edges[0].start, 
+                self.edges[-1].end,
+                self.edges[0].start,
                 [[0.7, 0.2]]
             )
         )
 
         self.interfaces = {
             'to_collar': pyg.Interface(self, self.edges[0]),
-            'to_bodice': pyg.Interface(self, self.edges[1])
+            'to_bodice': pyg.Interface(self, self.edges[1]),
+            'outer': pyg.Interface(self, self.edges[2]),
         }
+
+
+# ------ Split-panel classes for lapel fold ------
+
+class FrontCollarInnerPanel(pyg.Panel):
+    """Inner strip of front lapel (closer to neck). Connects to back_stand.
+    Fold_line runs vertically on the right side (inset to avoid corner sharing).
+    """
+    def __init__(self, name, width, height, gap=0.5) -> None:
+        super().__init__(name)
+
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [0, 0],                        # to_collar start
+            [width, 0],                    # to_collar end
+            [width, -gap],                 # corner tab
+            [width, -(height - gap)],      # fold_line (inset)
+            [width, -height],              # corner tab
+            [0, -height],                  # bottom
+            loop=True
+        )
+        self.interfaces = {
+            'to_collar': pyg.Interface(self, self.edges[0]),
+            'fold_line': pyg.Interface(self, self.edges[2]),
+        }
+
+
+class FrontCollarOuterPanel(pyg.Panel):
+    """Outer strip of front lapel (the fold-over part). Connects to back_fall.
+    Fold_line runs vertically on the left side (inset).
+    to_bodice on the right side connects to the bodice neckline.
+    """
+    def __init__(self, name, width, height, gap=0.5) -> None:
+        super().__init__(name)
+
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [0, 0],                        # to_collar start
+            [width, 0],                    # to_collar end = to_bodice start
+            [width, -height],              # to_bodice end
+            [0, -height],                  # bottom-left
+            [0, -(height - gap)],          # corner tab
+            [0, -gap],                     # fold_line (inset, going up)
+            loop=True
+        )
+        self.interfaces = {
+            'to_collar': pyg.Interface(self, self.edges[0]),
+            'to_bodice': pyg.Interface(self, self.edges[1]),
+            'fold_line': pyg.Interface(self, self.edges[4]),
+        }
+
+
+class LapelStandPanel(pyg.Panel):
+    """Upper portion of front lapel — stands upright from the neckline to the fold line.
+
+    to_bodice covers the FULL original length (not just stand_h) so the
+    neckline stitch matches exactly without subdivisions. The fold_line
+    is an inset edge at y=-stand_h, connected to to_bodice via a diagonal.
+    """
+    def __init__(self, name, stand_h, full_length, max_depth, gap=0.5) -> None:
+        super().__init__(name)
+
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [0, 0],                            # to_collar start
+            [max_depth, 0],                    # to_collar end
+            [max_depth, -full_length],         # to_bodice end (FULL length)
+            [max_depth - gap, -stand_h],       # diagonal to fold_line
+            [gap, -stand_h],                   # fold_line (inset)
+            [0, -stand_h],                     # inner start
+            loop=True
+        )
+        self.interfaces = {
+            'to_collar': pyg.Interface(self, self.edges[0]),
+            'to_bodice': pyg.Interface(self, self.edges[1]),
+            'fold_line': pyg.Interface(self, self.edges[3]),
+        }
+
+
+class SimpleLapelFallPanel(pyg.Panel):
+    """Lower portion of front lapel — folds over the stand. Carries the curved decorative edge.
+
+    fold_line is inset to avoid corner sharing. No to_bodice — the stand
+    panel covers the full neckline length.
+    """
+    def __init__(self, name, fall_h, max_depth, gap=0.5) -> None:
+        super().__init__(name)
+
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [gap, 0],                     # fold_line start (inset)
+            [max_depth - gap, 0],         # fold_line end (inset)
+            [max_depth, 0],               # corner tab
+            [max_depth, -fall_h]
+        )
+        self.edges.append(
+            pyg.CurveEdge(
+                self.edges[-1].end,
+                [0, 0],
+                [[0.7, 0.2]]
+            )
+        )
+        self.edges.append(pyg.EdgeSeqFactory.from_verts(
+            [0, 0], [gap, 0]
+        )[0])
+
+        self.interfaces = {
+            'fold_line': pyg.Interface(self, self.edges[0]),
+        }
+
+
+class BackCollarStandPanel(pyg.Panel):
+    """Lower portion of back collar — stands upright from the neckline.
+
+    Fold_line is inset by `gap` to avoid sharing corners with right/left edges.
+    """
+    def __init__(self, name, width, stand_depth, gap=0.5) -> None:
+        super().__init__(name)
+
+        # Top edge (fold line) is inset: doesn't touch right/left corners
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [0, 0],                            # 0: right start
+            [0, stand_depth],                  # 1: right end
+            [gap, stand_depth],                # 2: corner tab right
+            [width - gap, stand_depth],        # 3: fold_line (inset)
+            [width, stand_depth],              # 4: corner tab left
+            [width, 0],                        # 5: left end
+            loop=True
+        )
+
+        self.interfaces = {
+            'right': pyg.Interface(self, self.edges[0]),
+            'fold_line': pyg.Interface(self, self.edges[2]).reverse(True),
+            'left': pyg.Interface(self, self.edges[4]),
+            'bottom': pyg.Interface(self, self.edges[5]),
+        }
+
+        self.top_center_pivot()
+        self.center_x()
+
+
+class BackCollarFallPanel(pyg.Panel):
+    """Upper portion of back collar — rolls outward from the fold line.
+
+    Fold_line (bottom) is inset by `gap` to avoid sharing corners with right/left edges.
+    """
+    def __init__(self, name, width, fall_depth, gap=0.5) -> None:
+        super().__init__(name)
+
+        # Bottom edge (fold line) is inset: doesn't touch right/left corners
+        self.edges = pyg.EdgeSeqFactory.from_verts(
+            [0, 0],                            # 0: right start
+            [0, fall_depth],                   # 1: right end = top start
+            [width, fall_depth],               # 2: top end = left start
+            [width, 0],                        # 3: left end
+            [width - gap, 0],                  # 4: corner tab left
+            [gap, 0],                          # 5: fold_line (inset)
+            loop=True
+        )
+
+        self.interfaces = {
+            'right': pyg.Interface(self, self.edges[0]),
+            'top': pyg.Interface(self, self.edges[1]).reverse(True),
+            'left': pyg.Interface(self, self.edges[2]),
+            'fold_line': pyg.Interface(self, self.edges[4]),
+        }
+
+        self.top_center_pivot()
+        self.center_x()
 
 
 class SimpleLapel(pyg.Component):
@@ -205,7 +371,6 @@ class SimpleLapel(pyg.Component):
         super().__init__(f'Turtle_{tag}')
 
         depth = design['collar']['component']['depth']['v']
-        standing = design['collar']['component']['lapel_standing']['v']
 
         # --Projecting shapes--
         # Any front one!
@@ -228,52 +393,99 @@ class SimpleLapel(pyg.Component):
         # -- Panels --
         length_f, length_b = f_collar.length(), b_collar.length()
         height_p = body['height'] - body['head_l'] + depth * 2
-        
+
         lapel_fold = design['collar']['component'].get('lapel_fold', {}).get('v', 0)
 
-        self.front = SimpleLapelPanel(
-            f'{tag}_collar_front', length_f, depth)
         if lapel_fold > 0:
-            # Pre-fold: rotate around the collar edge, position against body
-            self.front.set_pivot(self.front.edges[0].start)
-            self.front.rotate_by(R.from_euler('X', -lapel_fold, degrees=True))
-            self.front.translate_by([-depth * 2, height_p, 5])
+            # === 8-panel: horizontal front+back splits ===
+            # Front: stand (top) + fall (bottom), horizontal fold line.
+            # Back: stand (bottom) + fall (top), horizontal fold line.
+            # front_stand.to_collar connects to combined back right edges.
+            fold_frac = design['collar']['component'].get(
+                'lapel_fold_fraction', {}).get('v', 0.5)
+            stand_h = length_f * fold_frac
+            fall_h = length_f * (1 - fold_frac)
+            stand_d = depth * fold_frac
+            fall_d = depth * (1 - fold_frac)
+
+            self.front_stand = LapelStandPanel(
+                f'{tag}_collar_front_stand', stand_h, length_f, depth)
+            self.front_stand.translate_by([-depth * 2, height_p, 35])
+
+            self.front_fall = SimpleLapelFallPanel(
+                f'{tag}_collar_front_fall', fall_h, depth)
+            self.front_fall.translate_by([-depth * 3 - 5, height_p, 35])
+
+            self.back_stand = BackCollarStandPanel(
+                f'{tag}_collar_back_stand', length_b, stand_d)
+            self.back_stand.translate_by([-length_b / 2, height_p, -10])
+
+            self.back_fall = BackCollarFallPanel(
+                f'{tag}_collar_back_fall', length_b, fall_d)
+            self.back_fall.translate_by([length_b / 2 + 5, height_p, -10])
+
+            self.back_stand.interfaces['right'].set_right_wrong(True)
+            self.back_fall.interfaces['right'].set_right_wrong(True)
+
+            for e in self.back_stand.interfaces['fold_line'].edges:
+                e.label = f'{tag}_fold_line'
+            for e in self.back_fall.interfaces['fold_line'].edges:
+                e.label = f'{tag}_fold_line'
+
+            # -- Stitching --
+            self.stitching_rules.append((
+                self.front_stand.interfaces['fold_line'],
+                self.front_fall.interfaces['fold_line']
+            ))
+            self.stitching_rules.append((
+                self.back_stand.interfaces['fold_line'],
+                self.back_fall.interfaces['fold_line']
+            ))
+            self.stitching_rules.append((
+                self.front_stand.interfaces['to_collar'],
+                pyg.Interface.from_multiple(
+                    self.back_stand.interfaces['right'],
+                    self.back_fall.interfaces['right']
+                )
+            ))
+
+            self.interfaces.update({
+                'back': pyg.Interface.from_multiple(
+                    self.back_stand.interfaces['left'],
+                    self.back_fall.interfaces['left']
+                ),
+                # front_fall.to_bodice excluded from neckline to avoid
+                # transitive vertex collapse through the neckline loop.
+                # The fall connects only via the fold-line seam.
+                'bottom': pyg.Interface.from_multiple(
+                    self.front_stand.interfaces['to_bodice'].set_right_wrong(True),
+                    self.back_stand.interfaces['bottom'],
+                )
+            })
+
         else:
+            # === Original single-panel mode (no fold) ===
+            self.front = SimpleLapelPanel(
+                f'{tag}_collar_front', length_f, depth)
             self.front.translate_by([-depth * 2, height_p, 35])
 
-        if standing:
             self.back = StraightBandPanel(
                 f'{tag}_collar_back', length_b, depth)
-            if lapel_fold > 0:
-                # Stand the back collar upright
-                self.back.set_pivot(self.back.edges[3].start)
-                self.back.rotate_by(R.from_euler('X', -90, degrees=True))
-                self.back.translate_by([-length_b / 2, height_p, -3])
-            else:
-                self.back.translate_by([-length_b / 2, height_p, -10])
-        else:
-            rad, angle, _ = b_collar[0].as_radius_angle()
-            self.back = CircleArcPanel(
-                f'{tag}_collar_back', rad, depth, angle
-            ).translate_by([-length_b, height_p, -10])
-            self.back.rotate_by(R.from_euler('XYZ', [90, 45, 0], degrees=True))
-
-        if standing:
+            self.back.translate_by([-length_b / 2, height_p, -10])
             self.back.interfaces['right'].set_right_wrong(True)
 
-        self.stitching_rules.append((
-            self.front.interfaces['to_collar'],
-            self.back.interfaces['right']
-        ))
+            self.stitching_rules.append((
+                self.front.interfaces['to_collar'],
+                self.back.interfaces['right']
+            ))
 
-        self.interfaces.update({
-            #'front': NOTE: no front interface here
-            'back': self.back.interfaces['left'],
-            'bottom': pyg.Interface.from_multiple(
-                self.front.interfaces['to_bodice'].set_right_wrong(True),
-                self.back.interfaces['bottom'] if standing else self.back.interfaces['top'].set_right_wrong(True),
-            )
-        })
+            self.interfaces.update({
+                'back': self.back.interfaces['left'],
+                'bottom': pyg.Interface.from_multiple(
+                    self.front.interfaces['to_bodice'].set_right_wrong(True),
+                    self.back.interfaces['bottom'],
+                )
+            })
 
     def length(self):
         return self.interfaces['back'].edges.length()
@@ -382,133 +594,4 @@ class Hood2Panels(pyg.Component):
         return self.panel.length()
 
 
-# ------ Outerwear collar types ------
-
-class NotchedLapelPanel(pyg.Panel):
-    """Lapel panel with a notch cutout for jacket collars."""
-    def __init__(self, name, length, max_depth, notch_depth, notch_angle_rad) -> None:
-        super().__init__(name)
-
-        # Main lapel rectangle with notch cut at the top
-        notch_dx = notch_depth * np.sin(notch_angle_rad)
-        notch_dy = notch_depth * np.cos(notch_angle_rad)
-
-        self.edges = pyg.EdgeSeqFactory.from_verts(
-            [0, 0],                                     # bottom-left (collar junction)
-            [max_depth, 0],                              # bottom-right (front edge)
-            [max_depth, -length],                        # lower-right
-            [max_depth - notch_dx, -length + notch_dy],  # notch point
-            [0, -length + notch_dy + notch_dx * 0.3],    # gorge line end
-            loop=True,
-        )
-
-        self.interfaces = {
-            'to_collar': pyg.Interface(self, self.edges[0]),
-            'to_bodice': pyg.Interface(self, self.edges[1]),
-        }
-
-
-class NotchedLapelCollar(pyg.Component):
-    """Jacket collar with notched lapels.
-
-    Front: NotchedLapelPanel with notch cutout.
-    Back: Standing collar band (same as SimpleLapel).
-    """
-    def __init__(self, tag, body, design) -> None:
-        super().__init__(f'NotchedLapel_{tag}')
-
-        depth = design['collar']['component']['depth']['v']
-        standing = design['collar']['component'].get('lapel_standing', {}).get('v', True)
-
-        # Notch parameters
-        jacket_d = design.get('jacket', {})
-        notch_depth = jacket_d.get('lapel_width', {}).get('v', 6.0) * 0.3
-        notch_angle = np.deg2rad(jacket_d.get('lapel_notch_angle', {}).get('v', 75))
-
-        # Projecting shapes (neckline cuts)
-        collar_type = globals()[design['collar']['f_collar']['v']]
-        f_collar = collar_type(
-            design['collar']['fc_depth']['v'],
-            design['collar']['width']['v'],
-            angle=design['collar']['fc_angle']['v'],
-            flip=design['collar']['f_flip_curve']['v'])
-        b_collar = CircleNeckHalf(
-            design['collar']['bc_depth']['v'],
-            design['collar']['width']['v'])
-
-        self.interfaces = {
-            'front_proj': pyg.Interface(self, f_collar),
-            'back_proj': pyg.Interface(self, b_collar),
-        }
-
-        # Panels
-        length_f, length_b = f_collar.length(), b_collar.length()
-        height_p = body['height'] - body['head_l'] + depth * 2
-
-        lapel_fold = design['collar']['component'].get('lapel_fold', {}).get('v', 0)
-
-        self.front = NotchedLapelPanel(
-            f'{tag}_collar_front', length_f, depth,
-            notch_depth=notch_depth,
-            notch_angle_rad=notch_angle,
-        )
-        if lapel_fold > 0:
-            self.front.set_pivot(self.front.edges[0].start)
-            self.front.rotate_by(R.from_euler('X', -lapel_fold, degrees=True))
-            self.front.translate_by([-depth * 2, height_p, 5])
-        else:
-            self.front.translate_by([-depth * 2, height_p, 35])
-
-        if standing:
-            self.back = StraightBandPanel(
-                f'{tag}_collar_back', length_b, depth)
-            if lapel_fold > 0:
-                self.back.set_pivot(self.back.edges[3].start)
-                self.back.rotate_by(R.from_euler('X', -90, degrees=True))
-                self.back.translate_by([-length_b / 2, height_p, -3])
-            else:
-                self.back.translate_by([-length_b / 2, height_p, -10])
-        else:
-            rad, angle, _ = b_collar[0].as_radius_angle()
-            self.back = CircleArcPanel(
-                f'{tag}_collar_back', rad, depth, angle
-            ).translate_by([-length_b, height_p, -10])
-            self.back.rotate_by(R.from_euler('XYZ', [90, 45, 0], degrees=True))
-
-        if standing:
-            self.back.interfaces['right'].set_right_wrong(True)
-
-        self.stitching_rules.append((
-            self.front.interfaces['to_collar'],
-            self.back.interfaces['right']
-        ))
-
-        self.interfaces.update({
-            'back': self.back.interfaces['left'],
-            'bottom': pyg.Interface.from_multiple(
-                self.front.interfaces['to_bodice'].set_right_wrong(True),
-                self.back.interfaces['bottom'] if standing else self.back.interfaces['top'].set_right_wrong(True),
-            )
-        })
-
-    def length(self):
-        return self.interfaces['back'].edges.length()
-
-
-class PeakLapelCollar(NotchedLapelCollar):
-    """Jacket collar with peak lapels (upward-pointing).
-
-    Same structure as NotchedLapelCollar but with a steeper notch
-    angle that creates upward-pointing peaks.
-    """
-    def __init__(self, tag, body, design) -> None:
-        # Override notch angle to create peak effect
-        design = design.copy() if not isinstance(design, dict) else {**design}
-        jacket_d = design.get('jacket', {})
-        # Force a steep angle for peak lapels (narrower notch, points upward)
-        if 'jacket' not in design:
-            design['jacket'] = {}
-        design['jacket'] = {**jacket_d, 'lapel_notch_angle': {'v': 45}}
-        super().__init__(tag, body, design)
-        self.name = f'PeakLapel_{tag}'
 

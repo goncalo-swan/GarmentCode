@@ -353,7 +353,18 @@ class BodiceHalf(pyg.Component):
 
         # Label free lapel edges for fold attachment constraint.
         # Only label edges NOT involved in stitching (to avoid label conflicts).
-        if hasattr(self.collar_comp, 'front'):
+        if hasattr(self.collar_comp, 'front_fall'):
+            # Split-panel fold mode: label free edges of the fall panel
+            fall_panel = self.collar_comp.front_fall
+            stitched = set()
+            for iface_name in ('fold_line', 'to_bodice'):
+                if iface_name in fall_panel.interfaces:
+                    for e in fall_panel.interfaces[iface_name].edges:
+                        stitched.add(id(e))
+            for e in fall_panel.edges:
+                if id(e) not in stitched:
+                    e.label = f'{self.name}_lapel'
+        elif hasattr(self.collar_comp, 'front'):
             front_panel = self.collar_comp.front
             stitched = set()
             if 'to_collar' in front_panel.interfaces:

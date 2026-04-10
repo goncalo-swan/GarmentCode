@@ -17,6 +17,56 @@ import yaml
 from pygarment.data_config import Properties
 
 
+def _apply_collar_fold_rotations(folder):
+    """Rotate collar fold panels in the spec JSON after serialization.
+
+    Panels are serialized flat to avoid stitching vertex collapse cycles.
+    This applies the 3D rotations needed for the fold to work in simulation.
+    Only affects panels with 'collar_front_stand', 'collar_front_fall',
+    'collar_back_stand', or 'collar_back_fall' in their name.
+    """
+    import json
+    spec_files = list(folder.glob('*_specification.json'))
+    if not spec_files:
+        return
+    spec_file = spec_files[0]
+    with open(spec_file) as f:
+        spec = json.load(f)
+
+    modified = False
+    for pname, panel in spec.get('pattern', {}).get('panels', {}).items():
+        rot = panel.get('rotation', [0, 0, 0])
+        if 'collar_front_stand' in pname:
+            rot[0] -= 90
+            panel['translation'][2] = 3
+        elif 'collar_front_fall' in pname:
+            rot[0] += 60
+            panel['translation'][2] = 15
+        elif 'collar_back_stand' in pname:
+            rot[0] -= 90
+            panel['translation'][2] = -3
+        elif 'collar_back_fall' in pname:
+            rot[0] -= 60
+            panel['translation'][2] = -9
+        else:
+            continue
+        panel['rotation'] = rot
+        modified = True
+
+    if modified:
+        with open(spec_file, 'w') as f:
+            json.dump(spec, f, indent=2)
+
+
+def _deep_merge(base, overrides):
+    """Recursively merge overrides into base dict."""
+    for key, value in overrides.items():
+        if isinstance(value, dict) and key in base and isinstance(base[key], dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 def load_garment_config(config_path):
     """Load garment configuration from YAML file.
 
@@ -96,12 +146,26 @@ def run_pipeline(config):
                 prod, body_yaml,
                 elastic_waistband=config.get('elastic_waistband', False),
             )
-        folder, garment_name = generate_pattern(
-            size, design, body_yaml, output_base,
-            garment_prefix=garment_prefix,
-            reposition_panels=config.get('reposition_panels', False),
-            ankle_clearance_pct=config.get('ankle_clearance_pct', 0.05),
-        )
+        # Apply design overrides from config (e.g. upper type, collar, placket)
+        if 'design_overrides' in config:
+            _deep_merge(design, config['design_overrides'])
+        if garment_type == 'shirt':
+            folder, garment_name = generate_pattern(
+                size, design, body_yaml, output_base,
+                garment_prefix=garment_prefix,
+            )
+        else:
+            folder, garment_name = generate_pattern(
+                size, design, body_yaml, output_base,
+                garment_prefix=garment_prefix,
+                reposition_panels=config.get('reposition_panels', False),
+                ankle_clearance_pct=config.get('ankle_clearance_pct', 0.05),
+            )
+        # Post-process collar panels: rotate into fold positions.
+        # Panels are serialized flat to avoid stitching vertex collapse;
+        # rotation must be applied to the spec JSON before mesh generation.
+        _apply_collar_fold_rotations(folder)
+
         generated.append((folder, garment_name, size))
 
     # Step 2: Verify measurements (pants only)

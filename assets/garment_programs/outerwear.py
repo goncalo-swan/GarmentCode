@@ -7,8 +7,7 @@ class Jacket(ButtonDownShirt):
     """Jacket: open-front upper garment with wider placket.
 
     Extends ButtonDownShirt with wider default overlap and
-    compatibility with structured collar types (NotchedLapelCollar,
-    PeakLapelCollar).
+    compatibility with structured collar types (SimpleLapel).
     """
     def __init__(self, body, design, fitted=False) -> None:
         # Jacket uses its own placket_width if specified, falling back to shirt's
