@@ -33,8 +33,21 @@ def _apply_collar_fold_rotations(folder):
     with open(spec_file) as f:
         spec = json.load(f)
 
+    panels = spec.get('pattern', {}).get('panels', {})
+
+    # First pass: collect back_stand info so back_fall fold line can be aligned
+    stand_info = {}
+    for pname, panel in panels.items():
+        if 'collar_back_stand' in pname:
+            side = pname.split('_collar_back_stand')[0]
+            fold_y = max(abs(v[1]) for v in panel['vertices'])
+            stand_info[side] = {
+                'translation': list(panel['translation']),
+                'fold_y': fold_y,
+            }
+
     modified = False
-    for pname, panel in spec.get('pattern', {}).get('panels', {}).items():
+    for pname, panel in panels.items():
         rot = panel.get('rotation', [0, 0, 0])
         if 'collar_front_stand' in pname:
             rot[0] -= 90
@@ -43,11 +56,19 @@ def _apply_collar_fold_rotations(folder):
             rot[0] += 60
             panel['translation'][2] = 15
         elif 'collar_back_stand' in pname:
-            rot[0] -= 90
-            panel['translation'][2] = -3
+            # Vertical against neck: no X rotation (local Y → 3D Y upward)
+            panel['translation'][2] = -5
         elif 'collar_back_fall' in pname:
-            rot[0] -= 60
-            panel['translation'][2] = -9
+            side = pname.split('_collar_back_fall')[0]
+            # Fold backward and downward from fold line
+            rot[0] = -120
+            if side in stand_info:
+                si = stand_info[side]
+                # Align fall's fold_line (local y=0) with stand's fold_line
+                # (local y=fold_y, which with 0° rotation is at stand_Y + fold_y)
+                panel['translation'][0] = si['translation'][0]
+                panel['translation'][1] = si['translation'][1] + si['fold_y']
+            panel['translation'][2] = -5
         else:
             continue
         panel['rotation'] = rot
