@@ -594,4 +594,115 @@ class Hood2Panels(pyg.Component):
         return self.panel.length()
 
 
+# ------ Post-serialization spec JSON transforms ------
+# These functions are applied after pattern.serialize() writes the spec JSON,
+# because the panels they target are deliberately serialized flat to avoid
+# stitching vertex collapse cycles.  They edit the written JSON to impose the
+# 3D rotations/translations needed for the fold (collar) or backward tilt
+# (hood) to behave correctly during simulation.
 
+def apply_collar_fold_rotations(folder):
+    """Rotate collar fold panels in the spec JSON after serialization.
+
+    Panels are serialized flat to avoid stitching vertex collapse cycles.
+    This applies the 3D rotations needed for the fold to work in simulation.
+    Only affects panels with 'collar_front_stand', 'collar_front_fall',
+    'collar_back_stand', or 'collar_back_fall' in their name.
+    """
+    import json
+    spec_files = list(folder.glob('*_specification.json'))
+    if not spec_files:
+        return
+    spec_file = spec_files[0]
+    with open(spec_file) as f:
+        spec = json.load(f)
+
+    panels = spec.get('pattern', {}).get('panels', {})
+
+    # First pass: collect back_stand info so back_fall fold line can be aligned
+    stand_info = {}
+    for pname, panel in panels.items():
+        if 'collar_back_stand' in pname:
+            side = pname.split('_collar_back_stand')[0]
+            fold_y = max(abs(v[1]) for v in panel['vertices'])
+            stand_info[side] = {
+                'translation': list(panel['translation']),
+                'fold_y': fold_y,
+            }
+
+    modified = False
+    for pname, panel in panels.items():
+        rot = panel.get('rotation', [0, 0, 0])
+        if 'collar_front_stand' in pname:
+            rot[0] -= 90
+            panel['translation'][2] = 3
+        elif 'collar_front_fall' in pname:
+            rot[0] += 60
+            panel['translation'][2] = 15
+        elif 'collar_back_stand' in pname:
+            # Vertical against neck: no X rotation (local Y → 3D Y upward)
+            panel['translation'][2] = -5
+        elif 'collar_back_fall' in pname:
+            side = pname.split('_collar_back_fall')[0]
+            # Fold backward and downward from fold line
+            rot[0] = -120
+            if side in stand_info:
+                si = stand_info[side]
+                # Align fall's fold_line (local y=0) with stand's fold_line
+                # (local y=fold_y, which with 0° rotation is at stand_Y + fold_y)
+                panel['translation'][0] = si['translation'][0]
+                panel['translation'][1] = si['translation'][1] + si['fold_y']
+            panel['translation'][2] = -5
+        else:
+            continue
+        panel['rotation'] = rot
+        modified = True
+
+    if modified:
+        with open(spec_file, 'w') as f:
+            json.dump(spec, f, indent=2)
+
+
+def apply_hood_down(folder):
+    """Tilt hood panels backward so gravity drapes them behind the neck.
+
+    The default hood placement extends upward over the head.  A small
+    X-rotation tilts the panels backward just enough for gravity to
+    pull them off the head during simulation.
+    """
+    import json
+    spec_files = list(folder.glob('*_specification.json'))
+    if not spec_files:
+        return
+    spec_file = spec_files[0]
+    with open(spec_file) as f:
+        spec = json.load(f)
+
+    modified = False
+    for pname, panel in spec.get('pattern', {}).get('panels', {}).items():
+        if '_hood' not in pname:
+            continue
+
+        # Build a rotation that tilts the hood top backward (-Z) and
+        # downward (-Y) instead of upward (+Y).
+        # The default Ry(±90°) puts local X→Z, local Y→Y.
+        # We want local Y → (0, -0.5, -0.866) (60° past vertical, behind).
+        is_right = 'right' in pname or pname.startswith('r')
+        sign = 1 if is_right else -1
+
+        # local Z (panel normal) faces outward (±X)
+        col_z = np.array([sign, 0, 0], dtype=float)
+        # local Y (hood height) points backward and down
+        col_y = np.array([0, -0.5, -0.866], dtype=float)
+        # local X = Y × Z
+        col_x = np.cross(col_y, col_z)
+        col_x /= np.linalg.norm(col_x)
+
+        rot_mat = np.column_stack([col_x, col_y, col_z])
+        euler = R.from_matrix(rot_mat).as_euler('XYZ', degrees=True)
+        panel['rotation'] = euler.tolist()
+        modified = True
+
+    if modified:
+        with open(spec_file, 'w') as f:
+            json.dump(spec, f, indent=2)
