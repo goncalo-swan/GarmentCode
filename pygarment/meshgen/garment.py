@@ -233,7 +233,7 @@ class Cloth:
             # Overall filter that ignores internal geometry (and arms for lower-body garments)
             body_filter_parts = ['face_internal']
             has_leg_panels = any(l in ('left_leg', 'right_leg', 'legs') for l in cloth_reference_labels)
-            has_arm_panels = any(l == 'arm' for l in cloth_reference_labels)
+            has_arm_panels = any(l in ('left_arm', 'right_arm', 'arm', 'arms') for l in cloth_reference_labels)
             is_lower_body = has_leg_panels and not has_arm_panels
             if is_lower_body:
                 body_filter_parts.extend(['left_arm', 'right_arm', 'arms'])
