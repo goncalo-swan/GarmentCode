@@ -230,12 +230,15 @@ class Cloth:
                 vert_connectivity=v_connectivity
             )
 
-            # Overall filter that ignores internal geometry (and arms for lower-body garments)
+            # Overall filter that ignores internal geometry (and arms for lower-body garments
+            # or upper-body garments with sleeves — in both cases the torso/body-labeled
+            # particles should not collide with the arms; sleeve-labeled particles stay
+            # unfiltered so they still collide with the arms and wrap correctly).
             body_filter_parts = ['face_internal']
             has_leg_panels = any(l in ('left_leg', 'right_leg', 'legs') for l in cloth_reference_labels)
             has_arm_panels = any(l in ('left_arm', 'right_arm', 'arm', 'arms') for l in cloth_reference_labels)
             is_lower_body = has_leg_panels and not has_arm_panels
-            if is_lower_body:
+            if is_lower_body or has_arm_panels:
                 body_filter_parts.extend(['left_arm', 'right_arm', 'arms'])
             face_filters.append(assign.create_face_filter(
                 body_vertices, body_indices, body_seg, body_filter_parts, smpl_body=self.paths.use_smpl_seg))
@@ -386,6 +389,29 @@ class Cloth:
                         wp.vec3(0., 1., 0.),    # Vertical attachment
                         stiffness = config.attachment_stiffness[i],
                         damping = config.attachment_damping[i]
+                    )
+                elif attach_label == 'pants_crotch':
+                    lables_present = True
+
+                    # Pin pants crotch vertices to body crotch Y so a lifted
+                    # garment (via ankle_clearance) doesn't pull the crotch
+                    # into the torso during the zero-gravity phase. Released
+                    # after attachment_frames.
+                    if '_waist_level' in body_dict:
+                        waist_level = body_dict['_waist_level']
+                    else:
+                        waist_level = (body_dict['height']
+                                       - body_dict['head_l']
+                                       - body_dict['waist_line'])
+                    hips_line = body_dict.get('hips_line', 22.0)
+                    crotch_hip_diff = body_dict.get('crotch_hip_diff', 8.0)
+                    target_y = waist_level - hips_line - crotch_hip_diff
+                    builder.add_attachment(
+                        constaint_verts,
+                        wp.vec3(0, target_y, 0),
+                        wp.vec3(0., 1., 0.),    # Vertical attachment only
+                        stiffness=config.attachment_stiffness[i],
+                        damping=config.attachment_damping[i]
                     )
                 else:
                     print(f'{self.name}::WARNING::Requested attachment label {attach_label} '

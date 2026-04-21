@@ -118,8 +118,7 @@ def run_pipeline(config):
             folder, garment_name = generate_pattern(
                 size, design, body_yaml, output_base,
                 garment_prefix=garment_prefix,
-                reposition_panels=config.get('reposition_panels', False),
-                ankle_clearance_pct=config.get('ankle_clearance_pct', 0.05),
+                ankle_clearance_pct=config.get('ankle_clearance_pct', 0.03),
             )
         # Post-process collar panels: rotate into fold positions.
         # Panels are serialized flat to avoid stitching vertex collapse;

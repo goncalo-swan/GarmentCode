@@ -17,7 +17,7 @@ Measurements from techpack:
   - Back rise: "Back rise"
 """
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '1')
 
 from pathlib import Path
 from datetime import datetime
@@ -954,8 +954,8 @@ def map_production_to_design(prod, body_yaml_path, elastic_waistband=False):
 
 
 def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
-                     garment_prefix='hm_pants', reposition_panels=False,
-                     ankle_clearance_pct=0.05):
+                     garment_prefix='hm_pants',
+                     ankle_clearance_pct=0.03):
     """Generate pattern using built-in MetaGarment system."""
     from assets.garment_programs.meta_garment import MetaGarment
     from assets.bodies.body_params import BodyParameters
@@ -986,52 +986,6 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
         view_ids=False,
         with_printable=True
     )
-
-    # --- Post-process: reposition panels for reliable stitching ---
-    # Only needed for garments where the default 45cm Z gap causes back
-    # panels to wrap outside the legs (e.g. oversized sweatpants).
-    # Enabled via reposition_panels=True / config flag reposition_panels.
-    if reposition_panels:
-        spec_files = list(Path(folder).glob('*_specification.json'))
-        if spec_files:
-            with open(spec_files[0]) as f:
-                spec = json.load(f)
-            panels = spec.get('pattern', {}).get('panels', {})
-            # Build front-panel X lookup
-            front_x = {}
-            for pname, panel in panels.items():
-                if 'pant_f' in pname:
-                    front_x[pname] = panel['translation'][0]
-            modified = False
-            for pname, panel in panels.items():
-                if 'pant_f' in pname:
-                    old_z = panel['translation'][2]
-                    panel['translation'][2] = 10
-                    print(f'    {pname}: Z {old_z} -> 10')
-                    modified = True
-                elif 'pant_b' in pname:
-                    fkey = pname.replace('pant_b', 'pant_f')
-                    fx = front_x.get(fkey, panel['translation'][0])
-                    old_x = panel['translation'][0]
-                    new_x = old_x + 0.5 * (fx - old_x)
-                    old_z = panel['translation'][2]
-                    panel['translation'][0] = new_x
-                    panel['translation'][2] = -5
-                    print(f'    {pname}: X {old_x:.1f}->{new_x:.1f}, Z {old_z}->{-5}')
-                    modified = True
-                elif pname == 'wb_front':
-                    old_z = panel['translation'][2]
-                    panel['translation'][2] = 10
-                    print(f'    {pname}: Z {old_z} -> 10')
-                    modified = True
-                elif pname == 'wb_back':
-                    old_z = panel['translation'][2]
-                    panel['translation'][2] = -5
-                    print(f'    {pname}: Z {old_z} -> -5')
-                    modified = True
-            if modified:
-                with open(spec_files[0], 'w') as f:
-                    json.dump(spec, f, indent=2)
 
     print(f'  Pattern generated: {garment_name} -> {folder}')
     return Path(folder), garment_name

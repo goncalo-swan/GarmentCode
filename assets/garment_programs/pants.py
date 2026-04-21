@@ -140,6 +140,7 @@ class PantPanel(pyg.Panel):
             target_tan1=np.array([1, 0]),
             initial_guess=[0.5, -0.5]
         )
+        crotch_bottom.label = 'pants_crotch'
 
         if use_subcurves:
             # --- Inseam with 3 subcurves: crotch→thigh, thigh→knee, knee→ankle ---
