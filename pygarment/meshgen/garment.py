@@ -146,7 +146,7 @@ class Cloth:
         self._compressed_initial_q = None
         try:
             auto_clearance = float(
-                getattr(config, 'auto_pre_lift_clearance', 1.0) or 0)
+                getattr(config, 'auto_pre_lift_clearance', 2.0) or 0)
             auto_enabled = bool(
                 getattr(config, 'auto_pre_lift_enabled', True))
         except Exception:

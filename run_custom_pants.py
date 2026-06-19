@@ -1254,12 +1254,13 @@ def _apply_pose_x_rotation(folder, body_obj_path,
         json.dump(spec, f, indent=2)
 
 
-CROTCH_TARGET_OFFSET = 0.0  # garment crotch placed AT body crotch
+CROTCH_TARGET_OFFSET = 0.5  # garment crotch placed 0.5cm above body crotch
 # NOTE: the garment crotch is placed at exactly body_crotch_Y + CROTCH_TARGET_OFFSET.
 # body_crotch_Y now comes from the SMPL crotch landmark vertex (see _body_crotch_Y)
-# when the body mesh is SMPL, so offset 0 lands the garment on the real crotch.
-# before simulation (was previously ~10cm too high due to a bad as-built
-# assumption). So -1 here genuinely means 1cm below the body crotch.
+# when the body mesh is SMPL, so offset 0.5 lands the garment 0.5cm above the real
+# crotch (the as-built crotch is measured from the pattern, not assumed; the old
+# assumption was ~10cm too high). A negative offset would place the garment
+# that many cm below the body crotch; a positive one, above it.
 
 
 def _garment_crotch_Y(garment):
@@ -1313,33 +1314,30 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
                      anchor_mode='crotch_zero'):
     """Generate pattern using built-in MetaGarment system.
 
-    anchor_mode:
-        'crotch'          — DEFAULT. Garment crotch starts at
-                            body_crotch_Y + CROTCH_TARGET_OFFSET (currently -2cm),
-                            with a floor safety: if that placement would put any
-                            panel below height*ankle_clearance_pct, lift more.
-                            lift = max(band_width + 5 + CROTCH_TARGET_OFFSET,
-                                       ankle_clearance - bbox_min[1])
-        'ankle_clearance' — Legacy: only enforce floor constraint. Crotch ends up
-                            at body_crotch_Y - band_width - 5 for short pants.
-        'crotch_zero'     — Always lift by (band_width + 5 + CROTCH_TARGET_OFFSET);
-                            no floor safety.
-        'midway'          — Average of ankle_clearance and crotch_zero lifts.
+    Placement: 'crotch_zero' is the ONLY supported anchor mode. The whole
+    MetaGarment (pants panels + waistband) is lifted uniformly in Y so the
+    garment's as-built crotch sits at body_crotch_Y + CROTCH_TARGET_OFFSET
+    (CROTCH_TARGET_OFFSET is currently 0.5, i.e. 0.5cm above the body crotch).
+    There is no floor safety here — if the hem then sits below the floor, the
+    sim's auto pre-lift compression (garment.py) compresses the lower garment
+    so the hem ends ~2cm above the floor.
 
-    The lift is applied via garment.translate_by, which shifts the WHOLE
-    MetaGarment (pants panels + waistband) uniformly in Y.
+    `ankle_clearance_pct` and `anchor_mode` are kept in the signature only for
+    call-site compatibility; any anchor_mode other than 'crotch_zero' is an
+    error.
     """
     from assets.garment_programs.meta_garment import MetaGarment
     from assets.bodies.body_params import BodyParameters
+
+    if anchor_mode != 'crotch_zero':
+        raise ValueError(
+            f"anchor_mode={anchor_mode!r} is no longer supported; "
+            f"'crotch_zero' is the only mode")
 
     garment_name = f'{name_prefix}{garment_prefix}_size{size}'
 
     body = BodyParameters(body_yaml_path)
     garment = MetaGarment(garment_name, body, design)
-
-    bbox_min, _ = garment.bbox3D()
-    ankle_clearance = body['height'] * ankle_clearance_pct
-    lift_ankle = max(0.0, ankle_clearance - bbox_min[1])
 
     band_width = (design.get('waistband', {}).get('width', {}).get('v', 0.0)
                   * body['hips_line'])
@@ -1351,25 +1349,13 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
     body_crotch_Y = _body_crotch_Y(body, body_yaml_path)
     as_built_crotch_Y = _garment_crotch_Y(garment)
     if as_built_crotch_Y is not None:
-        lift_crotch = (body_crotch_Y + CROTCH_TARGET_OFFSET) - as_built_crotch_Y
+        lift = (body_crotch_Y + CROTCH_TARGET_OFFSET) - as_built_crotch_Y
     else:
         # Fallback to the legacy (approximate) formula if the crotch interface
         # can't be located (e.g. non-pants lower garments).
-        lift_crotch = band_width + 5.0 + CROTCH_TARGET_OFFSET
+        lift = band_width + 5.0 + CROTCH_TARGET_OFFSET
 
-    if anchor_mode == 'crotch':
-        lift = max(lift_crotch, lift_ankle)
-    elif anchor_mode == 'ankle_clearance':
-        lift = lift_ankle
-    elif anchor_mode == 'crotch_zero':
-        lift = lift_crotch
-    elif anchor_mode == 'midway':
-        lift = 0.5 * (lift_ankle + lift_crotch)
-    else:
-        raise ValueError(f'Unknown anchor_mode={anchor_mode!r}')
-
-    print(f'  anchor_mode={anchor_mode}  band_width={band_width:.2f}  '
-          f'lift_ankle={lift_ankle:.2f}  lift_crotch={lift_crotch:.2f}  '
+    print(f'  anchor_mode=crotch_zero  band_width={band_width:.2f}  '
           f'applied_lift={lift:.2f}')
     if lift != 0.0:
         garment.translate_by([0, lift, 0])

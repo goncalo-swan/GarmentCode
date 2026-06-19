@@ -234,7 +234,7 @@ class SimConfig:
         self.auto_pre_lift_enabled = self.get_sim_props_value(
             sim_props_option, 'auto_pre_lift_enabled', True)
         self.auto_pre_lift_clearance = self.get_sim_props_value(
-            sim_props_option, 'auto_pre_lift_clearance', 1.0)
+            sim_props_option, 'auto_pre_lift_clearance', 2.0)
 
         # Body smoothing options
         self.enable_body_smoothing = self.get_sim_props_value(
