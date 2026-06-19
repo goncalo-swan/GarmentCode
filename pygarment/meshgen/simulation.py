@@ -14,7 +14,9 @@
 ###########################################################################
 
 import sys
+import os
 import time
+import threading
 import traceback
 import platform
 import multiprocessing
@@ -75,45 +77,74 @@ def update_progress(progress, total):
     sys.stdout.write('\rProgress: [{0:50s}] {1:.1f}%'.format('#' * num_dash + '-' * (50 - num_dash), amtDone * 100))
     sys.stdout.flush()
 
+class _FrameWatchdog:
+    """Daemon-thread wall-clock watchdog that hard-exits the process via
+    os._exit() if a frame doesn't complete in time.
+
+    Replaces the previous SIGALRM-based timeout, which silently fails on
+    Linux when garment.run_frame() spends its time inside CUDA / Warp
+    kernels — Python signal handlers only run between bytecodes, so the
+    pending alarm never gets a chance to interrupt a stuck native call.
+
+    Before exiting, a sentinel ``_TIMEOUT`` file is written to the sim
+    output dir (garment.paths.out_el) so that the orchestrating batch
+    script (or any post-hoc scan) can tag the run as timed out — in-process
+    bookkeeping in props['fails'] cannot run because os._exit skips Python
+    cleanup.
+    """
+    def __init__(self, seconds, garment, frame_num):
+        self.seconds = float(seconds)
+        self.garment = garment
+        self.frame_num = frame_num
+        self.cancel = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.cancel.set()
+
+    def _run(self):
+        if self.cancel.wait(self.seconds):
+            return  # frame finished in time, watchdog disarmed
+        try:
+            out_dir = getattr(self.garment.paths, 'out_el', None)
+            if out_dir is not None:
+                marker = os.fspath(out_dir) + '/_TIMEOUT'
+                with open(marker, 'w') as f:
+                    f.write(f'frame={self.frame_num} budget_s={self.seconds}\n')
+        except BaseException:
+            pass  # never let bookkeeping prevent the kill
+        os.write(2, f"\n[WATCHDOG] frame {self.frame_num} exceeded {self.seconds:.0f}s — hard exit\n".encode())
+        os._exit(124)  # GNU-timeout convention
+
+
 def _run_frame_with_timeout(garment, frame_timeout, frame_num):
     """Run frame while keeping a cap on time to run it"""
-    try:
-        if platform.system() == "Windows":
-            """https://stackoverflow.com/a/14920854"""
-
-            if frame_num == 0: #only do it on first frame due to slowdown
+    if platform.system() == "Windows":
+        # Existing Windows path — kept as-is. Note: original code had a
+        # subtle bug (target=garment.run_frame() with parens executes in
+        # the parent), but that's outside the scope of the watchdog fix.
+        try:
+            if frame_num == 0:
                 p_frame = multiprocessing.Process(target=garment.run_frame(), name="FrameSimulation")
                 p_frame.start()
-
-                # Wait timeout_after seconds for garment.run_frame()
                 p_frame.join(frame_timeout)
-
-                # If thread is active
                 if p_frame.is_alive():
-                    # Terminate the process
                     p_frame.terminate()
                     p_frame.join()
                     raise TimeoutError
             else:
                 garment.run_frame()
+        except TimeoutError:
+            raise FrameTimeOutError
+        return
 
-        elif platform.system() in ["Linux", "OSX"]:
-            """https://code-maven.com/python-timeout"""
-
-            def alarm_handler(signum, frame):
-                raise TimeoutError
-
-            signal.signal(signal.SIGALRM, alarm_handler)
-            signal.alarm(frame_timeout)
-            try:
-                garment.run_frame()
-            except TimeoutError as ex:
-                raise TimeoutError
-            else:
-                signal.alarm(0)
-
-    except TimeoutError as e:
-        raise FrameTimeOutError
+    # Linux / OSX: daemon-thread watchdog with os._exit on overrun.
+    with _FrameWatchdog(frame_timeout, garment, frame_num):
+        garment.run_frame()
 
 def sim_frame_sequence(garment, config, store_usd=False, verbose=False,
                        video_frames=None, render_props=None, frame_interval=10):
@@ -129,6 +160,13 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False,
     # Save initial state
     if store_usd:
         garment.render_usd_frame()
+
+    # Optional per-frame waistband-top trace (debug). Gated behind WB_TRACE
+    # env var = path to a CSV to write. Logs garment cloth max-Y per frame so
+    # we can see when (zero-gravity settle vs gravity drape) the height is set.
+    import os as _os
+    _wb_trace_path = _os.environ.get('WB_TRACE')
+    _wb_trace = [] if _wb_trace_path else None
 
     start_time = time.time()
     for frame in range(0, config.max_sim_steps):
@@ -167,6 +205,16 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False,
                 render_props
             ))
 
+        if _wb_trace is not None:
+            try:
+                import numpy as _np
+                cv = _np.asarray(garment.current_verts)
+                in_zg = frame < config.zero_gravity_steps
+                _wb_trace.append((frame, float(cv[:, 1].max()),
+                                  float(cv[:, 1].min()), int(in_zg)))
+            except Exception:
+                pass
+
         if frame >= config.zero_gravity_steps and frame >= config.min_sim_steps:
             static, _ = garment.is_static()
         if static:
@@ -175,6 +223,15 @@ def sim_frame_sequence(garment, config, store_usd=False, verbose=False,
         runtime = time.time() - start_time
         if runtime > config.max_sim_time:
             raise SimTimeOutError
+
+    if _wb_trace is not None and _wb_trace_path:
+        try:
+            with open(_wb_trace_path, 'w') as _f:
+                _f.write('frame,top_y_cm,bottom_y_cm,in_zero_gravity\n')
+                for row in _wb_trace:
+                    _f.write(f'{row[0]},{row[1]:.4f},{row[2]:.4f},{row[3]}\n')
+        except Exception:
+            pass
         
 
 def save_video(frames, video_path, fps=30):
@@ -292,6 +349,16 @@ def run_sim(
     sim_props['stats']['fin_frame'][cloth_name] = frame
 
     garment.save_frame(save_v_norms=save_v_norms) #saving after stats
+
+    # Export the FINAL body in the cloth's exact frame, so the combined mesh
+    # uses the body the sim actually ended on (critical when the body was
+    # animated to a new pose — otherwise the on-disk A-pose OBJ is mismatched).
+    try:
+        _body_final = str(paths.g_sim).replace('_sim.obj', '_body_final.obj')
+        trimesh.Trimesh(vertices=garment.v_body, faces=garment.f_body,
+                        process=False).export(_body_final)
+    except Exception as _e:
+        print(f'  body_final export skipped: {_e}')
 
     # Render images
     s_time = time.time()

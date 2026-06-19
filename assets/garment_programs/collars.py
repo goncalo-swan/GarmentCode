@@ -549,7 +549,7 @@ class HoodPanel(pyg.Panel):
             'to_bodice': pyg.Interface(self, self.edges[0:2]).reverse()
         }
 
-        self.rotate_by(R.from_euler('XYZ', [0, -90, 0], degrees=True))
+        self.rotate_by(R.from_euler('xyz', [0, -90, 0], degrees=True))
         self.translate_by([-width, 0, 0])
 
 class Hood2Panels(pyg.Component):
@@ -699,7 +699,7 @@ def apply_hood_down(folder):
         col_x /= np.linalg.norm(col_x)
 
         rot_mat = np.column_stack([col_x, col_y, col_z])
-        euler = R.from_matrix(rot_mat).as_euler('XYZ', degrees=True)
+        euler = R.from_matrix(rot_mat).as_euler('xyz', degrees=True)
         panel['rotation'] = euler.tolist()
         modified = True
 

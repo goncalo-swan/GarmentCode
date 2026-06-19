@@ -201,7 +201,10 @@ class ProductionToDesign:
         # This is the ease multiplier: 1.0 = skin-tight, 1.05 = standard ease
         bust_circ = garment['bust_circumference']
         width_v = bust_circ / b['bust']
-        width_v = np.clip(width_v, 1.0, 1.3)
+        # Lower bound 0.5 allows negative ease (knit/jersey garments cut
+        # smaller than the body bust — e.g. HDPAIGE off-shoulder, fitted
+        # tube tops). Upper bound stays at 1.3 to avoid runaway-loose tops.
+        width_v = np.clip(width_v, 0.5, 1.3)
 
         # --- Length (corrected for shoulder slope and collar cut) ---
         # Back panel center height = length_v * waist_line + sh_tan * btorso_width
@@ -240,16 +243,31 @@ class ProductionToDesign:
 
         # --- Sleeves ---
         hps_to_cuff = garment.get('hps_to_cuff', None)
+        # sleeve_from_shoulder: SLEEVELENGTH measured from the shoulder point to
+        # the cuff (the sleeve's own length). This IS sleeve_top_target, so it is
+        # used directly — the shoulder seam is built by the torso and must not be
+        # added again (that conflation runs the cuff past the wrist).
+        sleeve_from_shoulder = garment.get('sleeve_from_shoulder', None)
         sleeve_length_cm = garment.get('sleeve_length', None)
         arm_width_est = None  # Will be set if sleeve geometry is estimated
 
-        if hps_to_cuff is not None and hps_to_cuff > 0:
+        has_hps = hps_to_cuff is not None and hps_to_cuff > 0
+        has_from_shoulder = sleeve_from_shoulder is not None and sleeve_from_shoulder > 0
+        if has_hps or has_from_shoulder:
             sleeveless = False
             # Compute opening_length from ArmholeCurve construction
             # to get the exact denominator for sleeve_length_v
             opening_length, remaining_shoulder, arm_width_est = \
                 self._estimate_sleeve_geometry(bust_circ, b, collar_width_cm)
-            sleeve_top_target = hps_to_cuff - remaining_shoulder
+            # Brand-target bicep override: arm_width corresponds to half-bicep
+            # (one panel's cap width); full bicep circumference = 2 * arm_width.
+            bicep_target = garment.get('bicep_circumference', None)
+            if bicep_target is not None and bicep_target > 0:
+                arm_width_est = bicep_target / 2
+            if has_from_shoulder:
+                sleeve_top_target = sleeve_from_shoulder
+            else:
+                sleeve_top_target = hps_to_cuff - remaining_shoulder
             target_length = sleeve_top_target - opening_length
             available_arm = b['arm_length'] - opening_length
             sleeve_length_v = target_length / available_arm
@@ -277,16 +295,23 @@ class ProductionToDesign:
         collar_depth_front = garment.get('collar_depth_front', None)
         collar_depth_back = garment.get('collar_depth_back', None)
 
-        # Collar width: interpolation parameter between neck_w and shoulder_w-4
+        # Collar width: interpolation parameter that the bodice will invert to
+        # produce a garment collar width equal to the target. bodice.py uses:
+        #   if v >= 0: cw = neck_w + v * (max_w - neck_w)
+        #   if v <  0: cw = (1 + v) * neck_w
+        # Each branch is a different parametrisation, so the inverse here is
+        # also branched — but both make the produced garment width exact.
         collar_width_v = 0.2  # default
         if collar_width_cm is not None:
             min_w = b['neck_w']
             if collar_width_cm >= min_w:
                 max_w = b['_base_sleeve_balance'] - 2
+                # No upper clip: off-shoulder / wide-neck garments need v > 1.
+                # The bodice extrapolates linearly past max_w.
                 collar_width_v = (collar_width_cm - min_w) / (max_w - min_w)
-                collar_width_v = np.clip(collar_width_v, 0.0, 1.0)
+                collar_width_v = max(collar_width_v, 0.0)
             else:
-                # N < neck_w: use negative range [0, neck_w]
+                # target < neck_w → bodice formula: cw = (1 + v) * neck_w
                 collar_width_v = collar_width_cm / min_w - 1.0
                 collar_width_v = np.clip(collar_width_v, -1.0, 0.0)
 
@@ -467,17 +492,35 @@ class ProductionToDesign:
         if garment.get('thigh_circumference') and 'thigh_circ' in b:
             thigh_v = float(np.clip(
                 garment['thigh_circumference'] / b['thigh_circ'], 0.5, 2.5))
+
+        # Leg opening (ankle) — also used as the knee fallback target below
+        leg_opening = garment.get('leg_opening', hip_circ * 0.5)
+
+        # Knee: multiplier on body knee circumference. If the techpack omits
+        # Knee but provides Thigh and Ankle, interpolate linearly between them
+        # at the knee Y position rather than falling back to the body's knee.
+        # The body fallback creates a sharp bottleneck for jeans whose thigh
+        # and ankle are both well wider than the body's anatomical knee.
         knee_v = 1.0
         if garment.get('knee_circumference') and 'knee_circ' in b:
             knee_v = float(np.clip(
                 garment['knee_circumference'] / b['knee_circ'], 0.5, 2.5))
+        elif garment.get('thigh_circumference') and 'knee_circ' in b:
+            crotch_to_knee = garment.get('crotch_to_knee') or b.get('crotch_to_knee')
+            inseam_len = garment['length'] - b.get('crotch_hip_diff', 0)
+            if crotch_to_knee and inseam_len > 0:
+                frac = float(np.clip(crotch_to_knee / inseam_len, 0.0, 1.0))
+                knee_circ_target = (
+                    garment['thigh_circumference']
+                    + (leg_opening - garment['thigh_circumference']) * frac
+                )
+                knee_v = float(np.clip(knee_circ_target / b['knee_circ'], 0.5, 2.5))
 
         # Flare: solve for flare_v from target leg opening circumference
         # With width_v scaling both hips and crotch_ext:
         #   leg_opening = (hips/2 + min_ext) * width_v - 4 + leg_circ*(flare_v - 1)
         # where min_ext = leg_circ - hips/2 + 5, and the -4 comes from the
         # "magic value" (-2 cm) offset on each panel's inside seam bottom.
-        leg_opening = garment.get('leg_opening', hip_circ * 0.5)
         min_ext = b['leg_circ'] - b['hips'] / 2 + 5
         flare_v = (leg_opening - (b['hips'] / 2 + min_ext) * width_v + 4 + b['leg_circ']) / b['leg_circ']
 

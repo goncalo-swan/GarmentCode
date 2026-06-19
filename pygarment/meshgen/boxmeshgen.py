@@ -355,9 +355,57 @@ class Panel:
         new_points = tri_utils.cdt_insert_constraints(cdt, cdt_points, edge_verts_ids)
 
         # Faces without accidentially inserted points -- again!
-        # NOTE: point insertion might be a sign of degenerate triangles. 
+        # NOTE: point insertion might be a sign of degenerate triangles.
         # But instead a separate check was added
         f = list(tri_utils.get_face_v_ids(cdt, keep_pts_f, new_points, check=check, plot=plot))
+
+        # Drop tiny disconnected fragments from the CDT result.
+        # When cut_corner produces a near-degenerate corner_shape (start and
+        # end of the curve nearly coincident, which happens for wide collars/
+        # armholes on small panels), CGAL CDT can split the panel into a main
+        # region + a tiny fragment touching at a single vertex. Those
+        # fragments become separate UV islands (igl.facet_components needs a
+        # shared edge, not just a shared vertex) and show up as cosmetic
+        # mini-panels in the rendered texture. Keep the largest component.
+        if len(f) > 0:
+            import igl as _igl
+            f_arr = np.asarray(f)
+            num_comps, face_comp = _igl.facet_components(f_arr)
+            if num_comps > 1:
+                comp_sizes = np.bincount(face_comp)
+                main_comp = int(np.argmax(comp_sizes))
+                kept_mask = face_comp == main_comp
+                dropped = int((~kept_mask).sum())
+                if dropped > 0:
+                    print(f'{self.__class__.__name__}::{self.panel_name}::'
+                          f'dropped {dropped} disconnected faces from CDT '
+                          f'(kept main component with {comp_sizes[main_comp]} faces)')
+                # Preserve original element type (numpy arrays) — downstream
+                # does `face + texture_offset` which requires array-like.
+                f = list(f_arr[kept_mask])
+
+        # Drop degenerate sliver triangles (near-collinear vertices that fail
+        # the triangle inequality used by is_manifold). They arise from CDT on
+        # thin/concave regions — e.g. the shoulder strap left between a wide
+        # off-shoulder collar and the armhole. A sliver has ~zero area and lies
+        # on a line that adjacent triangles already cover, so removing it
+        # leaves no real hole but prevents NaN face normals + the manifold
+        # check from aborting the whole garment.
+        if len(f) > 0:
+            pts = np.asarray(keep_pts_f)
+            f_arr = np.asarray(f)
+            tri = pts[f_arr]
+            s = np.stack([
+                np.linalg.norm(tri[:, 0] - tri[:, 1], axis=1),
+                np.linalg.norm(tri[:, 1] - tri[:, 2], axis=1),
+                np.linalg.norm(tri[:, 0] - tri[:, 2], axis=1),
+            ], axis=-1)
+            good = s.sum(axis=1) > 2 * s.max(axis=1) + 1e-2
+            n_bad = int((~good).sum())
+            if n_bad > 0:
+                print(f'{self.__class__.__name__}::{self.panel_name}::'
+                      f'dropped {n_bad} degenerate sliver triangle(s) from CDT')
+                f = list(f_arr[good])
 
         #Store
         self.panel_vertices = keep_pts_f
@@ -583,7 +631,7 @@ class BoxMesh(wrappers.VisPattern):
         """
         Loads all relevant functions and prints their time consumptions
         """
-        if self.is_self_intersecting(): 
+        if self.is_self_intersecting():
             print(f'{self.__class__.__name__}::WARNING::{self.name}::Provided pattern has self-intersecting panels. Simulation might crash')
 
         self.load_panels()
@@ -1520,23 +1568,45 @@ class BoxMesh(wrappers.VisPattern):
         # Update with incoming values, if any
         uv_config.update(in_uv_config)
 
+        # Compact vertex_texture / faces_with_texture: drop any UV entries
+        # not referenced by any face, and remap face UV indices. Needed when
+        # gen_panel_mesh dropped CDT fragments — their per-panel
+        # vertex_texture entries become orphans, which unwarp_UV silently
+        # skips, breaking the face→UV index mapping in the written OBJ.
+        face_tex_arr = np.array(
+            [[tex_id0, tex_id1, tex_id2]
+             for _, tex_id0, _, tex_id1, _, tex_id2, in self.faces_with_texture])
+        vertex_tex_arr = np.array(self.vertex_texture)
+
+        used_uv_ids = np.unique(face_tex_arr)
+        if used_uv_ids.size < len(vertex_tex_arr):
+            old_to_new = -np.ones(len(vertex_tex_arr), dtype=np.int64)
+            old_to_new[used_uv_ids] = np.arange(used_uv_ids.size)
+            vertex_tex_arr = vertex_tex_arr[used_uv_ids]
+            face_tex_arr = old_to_new[face_tex_arr]
+            # Mirror the remap into self.faces_with_texture so save_obj writes
+            # consistent indices.
+            for fi, (v0, _, v1, _, v2, _) in enumerate(self.faces_with_texture):
+                t0, t1, t2 = face_tex_arr[fi]
+                self.faces_with_texture[fi] = [v0, int(t0), v1, int(t1), v2, int(t2)]
+
         uvs = texture_mesh_islands(
-            texture_coords=np.array(self.vertex_texture),
-            face_texture_coords=np.array([[tex_id0, tex_id1, tex_id2] for _, tex_id0, _, tex_id1, _, tex_id2, in self.faces_with_texture]), 
+            texture_coords=vertex_tex_arr,
+            face_texture_coords=face_tex_arr,
             out_texture_image_path=self.paths.g_texture,
             out_fabric_tex_image_path=self.paths.g_texture_fabric,
             out_mtl_file_path=self.paths.g_mtl,
-            boundary_width=uv_config['seam_width'], 
-            dpi=uv_config['dpi'], 
+            boundary_width=uv_config['seam_width'],
+            dpi=uv_config['dpi'],
             background_img_path=uv_config['fabric_grain_texture_path'],
             background_resolution=uv_config['fabric_grain_resolution'],
             mat_name=mat_name
         )
         save_obj(
-            self.paths.g_box_mesh, 
-            self.vertices, 
-            self.faces_with_texture, 
-            uvs, 
+            self.paths.g_box_mesh,
+            self.vertices,
+            self.faces_with_texture,
+            uvs,
             vert_normals=self.eval_vertex_normals() if with_normals else None,
             mtl_file_name=self.paths.g_mtl.name,
             mat_name=mat_name

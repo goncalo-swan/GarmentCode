@@ -205,11 +205,11 @@ class BodiceHalf(pyg.Component):
         if design['shirt']['strapless']['v'] and fitted:  # NOTE: Strapless design only for fitted tops
             self.make_strapless(body, design)
         else:
-            # Sleeves and collars 
+            # Sleeves and collars
             self.add_sleeves(name, body, design)
             self.add_collars(name, body, design)
             self.stitching_rules.append((
-                self.ftorso.interfaces['shoulder'], 
+                self.ftorso.interfaces['shoulder'],
                 self.btorso.interfaces['shoulder']
             ))  # tops
 
@@ -234,10 +234,13 @@ class BodiceHalf(pyg.Component):
         max_w = body['_base_sleeve_balance'] - 2  # 1 cm from default sleeve
         min_w = body['neck_w']
 
-        if design['collar']['width']['v'] >= 0:
-            design['collar']['width']['v'] = width = pyg.utils.lin_interpolation(min_w, max_w, design['collar']['width']['v'])
+        cw_v = design['collar']['width']['v']
+        if cw_v >= 0:
+            # Manual linear interpolation: allows extrapolation beyond max_w
+            # for off-shoulder / very wide necklines (v > 1).
+            design['collar']['width']['v'] = width = min_w + cw_v * (max_w - min_w)
         else:
-            design['collar']['width']['v'] = width = pyg.utils.lin_interpolation(0, min_w, 1 + design['collar']['width']['v'])
+            design['collar']['width']['v'] = width = pyg.utils.lin_interpolation(0, min_w, 1 + cw_v)
 
         # Depth
         # Collar depth is given w.r.t. length.
@@ -347,9 +350,15 @@ class BodiceHalf(pyg.Component):
                 self.btorso.interfaces['inside'], self.interfaces['back_collar']
             )
         
-        # Add edge labels
+        # Add edge labels.
+        # NOTE: only the FRONT collar edge gets the `{name}_collar` label.
+        # The back collar edge intentionally does not — when both halves were
+        # labelled, garment.py's X-pull attachment (right→-neck_w/2,
+        # left→+neck_w/2) pulled the back-center seam vertices in opposite
+        # directions and bunched the seam. The front-collar X-pull is the one
+        # we actually need for lapel positioning; the back collar settles
+        # cleanly via cloth dynamics + the fold-line Y-pin.
         fc_interface.edges.propagate_label(f'{self.name}_collar')
-        bc_interface.edges.propagate_label(f'{self.name}_collar')
 
         # Label free lapel edges for fold attachment constraint.
         # Only label edges NOT involved in stitching (to avoid label conflicts).
@@ -365,17 +374,25 @@ class BodiceHalf(pyg.Component):
                 if id(e) not in stitched:
                     e.label = f'{self.name}_lapel'
         elif hasattr(self.collar_comp, 'front'):
+            # Lapel-style components expose a front Panel with `to_collar` /
+            # `to_bodice` interfaces. Other components that just happen to
+            # have a `front` attribute (e.g. Turtle's StraightBandPanel) use
+            # different interface names and must NOT get `_lapel` labels —
+            # doing so overwrites collar-stitch labels (e.g. `front.left`)
+            # already set by propagate_label above, causing a stitch mismatch.
             front_panel = self.collar_comp.front
-            stitched = set()
-            if 'to_collar' in front_panel.interfaces:
-                for e in front_panel.interfaces['to_collar'].edges:
-                    stitched.add(id(e))
-            if 'to_bodice' in front_panel.interfaces:
-                for e in front_panel.interfaces['to_bodice'].edges:
-                    stitched.add(id(e))
-            for e in front_panel.edges:
-                if id(e) not in stitched:
-                    e.label = f'{self.name}_lapel'
+            if ('to_collar' in front_panel.interfaces
+                    or 'to_bodice' in front_panel.interfaces):
+                stitched = set()
+                if 'to_collar' in front_panel.interfaces:
+                    for e in front_panel.interfaces['to_collar'].edges:
+                        stitched.add(id(e))
+                if 'to_bodice' in front_panel.interfaces:
+                    for e in front_panel.interfaces['to_bodice'].edges:
+                        stitched.add(id(e))
+                for e in front_panel.edges:
+                    if id(e) not in stitched:
+                        e.label = f'{self.name}_lapel'
 
     def make_strapless(self, body, design):
 
@@ -555,9 +572,14 @@ class ButtonDownShirt(Shirt):
             self.stitching_rules.append((self.right.interfaces['front_in'],
                                          self.left.interfaces['front_in']))
         elif closure > 0:
-            right_partial = self._partial_front_in(self.right, closure)
-            left_partial = self._partial_front_in(self.left, closure)
-            self.stitching_rules.append((right_partial, left_partial))
+            # Optional middle-band closure (e.g. a blazer buttoned only at the
+            # waist, lapel + hem open): closure_start shifts the closed band up
+            # from the hem. Default 0 = bottom-up.
+            closure_start = design['shirt'].get('closure_start', {}).get('v', 0.0)
+            right_partial = self._partial_front_in(self.right, closure, closure_start)
+            left_partial = self._partial_front_in(self.left, closure, closure_start)
+            if right_partial is not None and left_partial is not None:
+                self.stitching_rules.append((right_partial, left_partial))
 
         self.interfaces = {
             'bottom': pyg.Interface.from_multiple(
@@ -568,71 +590,74 @@ class ButtonDownShirt(Shirt):
         }
 
     @staticmethod
-    def _partial_front_in(half, closure):
-        """Return an Interface covering the bottom `closure` fraction of front_in.
+    def _partial_front_in(half, closure, closure_start=0.0):
+        """Return an Interface covering a band of front_in measured from the
+        bottom (hem): the band spans [closure_start, closure_start+closure] of
+        the total front length.
 
-        Detects edge direction (top→bottom vs bottom→top after mirroring)
-        and always closes from the bottom up.
+        closure_start=0 closes the bottom `closure` fraction (the original
+        behaviour). closure_start>0 closes a middle band, leaving both the
+        bottom (hem) and the top (lapel/neckline) open — e.g. a blazer
+        buttoned only at the waist.
         """
         front_in = half.interfaces['front_in']
         total_len = front_in.edges.length()
-        target_len = total_len * closure
+        band_lo = total_len * max(closure_start, 0.0)
+        band_hi = total_len * min(closure_start + closure, 1.0)
 
         # Detect direction: compare Y of first and last vertex
         first_y = front_in.edges[0].start[1]
         last_y = front_in.edges[-1].end[1]
         bottom_is_at_end = first_y > last_y  # top→bottom: bottom at end
 
-        n = len(front_in.edges)
-        collected_edges = []
-        collected_panels = []
-        cumulative = 0
-
+        # Snapshot (edge, panel, c0, c1, len) in BOTTOM→TOP order so we can
+        # mutate front_in.edges (subdivision) without invalidating indices.
+        order = list(range(len(front_in.edges)))
         if bottom_is_at_end:
-            # Walk backward from end (bottom) toward start (top)
-            for i in range(n - 1, -1, -1):
-                edge = front_in.edges[i]
-                edge_len = edge.length()
-                if cumulative + edge_len <= target_len:
-                    collected_edges.insert(0, edge)
-                    collected_panels.insert(0, front_in.panel[i])
-                    cumulative += edge_len
-                else:
-                    remaining = target_len - cumulative
-                    if remaining > 0.1:
-                        frac = remaining / edge_len
-                        parts = edge.subdivide_len([1 - frac, frac])
-                        front_in.panel[i].edges.substitute(edge, parts)
-                        front_in.substitute(edge, parts,
-                            [front_in.panel[i]] * len(parts))
-                        collected_edges.insert(0, parts[1])
-                        collected_panels.insert(0, front_in.panel[i])
-                    break
-        else:
-            # Walk forward from start (bottom) toward end (top)
-            for i in range(n):
-                edge = front_in.edges[i]
-                edge_len = edge.length()
-                if cumulative + edge_len <= target_len:
-                    collected_edges.append(edge)
-                    collected_panels.append(front_in.panel[i])
-                    cumulative += edge_len
-                else:
-                    remaining = target_len - cumulative
-                    if remaining > 0.1:
-                        frac = remaining / edge_len
-                        parts = edge.subdivide_len([frac, 1 - frac])
-                        front_in.panel[i].edges.substitute(edge, parts)
-                        front_in.substitute(edge, parts,
-                            [front_in.panel[i]] * len(parts))
-                        collected_edges.append(parts[0])
-                        collected_panels.append(front_in.panel[i])
-                    break
+            order = order[::-1]
+        spans = []
+        cumulative = 0.0
+        for i in order:
+            edge = front_in.edges[i]
+            panel = front_in.panel[i]
+            L = edge.length()
+            spans.append((edge, panel, cumulative, cumulative + L, L))
+            cumulative += L
 
-        if len(collected_edges) == 1:
-            return pyg.Interface(collected_panels[0], collected_edges[0])
-        partial_ints = [pyg.Interface(p, e) for e, p in zip(collected_edges, collected_panels)]
-        return pyg.Interface.from_multiple(*partial_ints)
+        eps = 1e-3
+        collected = []  # (panel, edge)
+        for edge, panel, c0, c1, L in spans:
+            lo = max(c0, band_lo)
+            hi = min(c1, band_hi)
+            if hi - lo <= 0.1:
+                continue  # edge outside the band
+            # edge-local fractions in bottom→top direction
+            f_lo = (lo - c0) / L
+            f_hi = (hi - c0) / L
+            # map to the edge's own start→end direction
+            if bottom_is_at_end:
+                e_lo, e_hi = 1.0 - f_hi, 1.0 - f_lo
+            else:
+                e_lo, e_hi = f_lo, f_hi
+
+            if e_lo < eps and e_hi > 1.0 - eps:
+                collected.append((panel, edge))
+                continue
+            if e_lo < eps:
+                parts = edge.subdivide_len([e_hi, 1.0 - e_hi]); keep = parts[0]
+            elif e_hi > 1.0 - eps:
+                parts = edge.subdivide_len([e_lo, 1.0 - e_lo]); keep = parts[1]
+            else:
+                parts = edge.subdivide_len([e_lo, e_hi - e_lo, 1.0 - e_hi]); keep = parts[1]
+            panel.edges.substitute(edge, parts)
+            front_in.substitute(edge, parts, [panel] * len(parts))
+            collected.append((panel, keep))
+
+        if not collected:
+            return None
+        if len(collected) == 1:
+            return pyg.Interface(collected[0][0], collected[0][1])
+        return pyg.Interface.from_multiple(*[pyg.Interface(p, e) for p, e in collected])
 
     def length(self):
         return self.right.length()

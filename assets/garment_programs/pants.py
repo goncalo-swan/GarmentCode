@@ -5,6 +5,10 @@ import pygarment as pyg
 from assets.garment_programs.base_classes import BaseBottoms
 from assets.garment_programs import bands
 
+# Set by run_garment.py from garment config `symknee` field. Default False keeps
+# baseline linear knee taper; True switches to centered-knee placement.
+SYMKNEE = False
+
 
 class PantPanel(pyg.Panel):
     def __init__(
@@ -21,9 +25,24 @@ class PantPanel(pyg.Panel):
             thigh_width=None,
             knee_width=None,
             knee_y=None,
-            thigh_y=None) -> None:
+            thigh_y=None,
+            front_slit=None,
+            barrel_bow=None,
+            clo_match=False) -> None:
         """
             Basic pant panel with option to be fitted (with darts)
+
+            front_slit: if set (cm), cut a thin V-notch this tall into the
+                ankle (bottom) edge at its midpoint (center-front). The cut
+                edges are left unstitched, opening into a front split hem.
+
+            barrel_bow: if set (fraction of leg length, e.g. 0.06), bow the
+                outseam OUTWARD between the pinned measurement points (ankle,
+                knee, thigh) without moving those points. Because the bow lives
+                strictly between samples, every girth POM is preserved exactly;
+                the extra outward excursion is the barrel silhouette. Only
+                active in subcurve mode (thigh/knee controls present). Default
+                None leaves the outseam untouched — no effect on other configs.
         """
         super().__init__(name)
 
@@ -53,17 +72,33 @@ class PantPanel(pyg.Panel):
                          and knee_y is not None and thigh_y is not None)
 
         # --- Edges definition ---
+        # Defaults so the non-subcurve / non-barrel paths don't reference these
+        # before assignment (both are only set inside the subcurve branch).
+        inner_dx = None
+        outseam_led_knee_x = None
         if use_subcurves:
             # --- Outseam with 3 subcurves: ankle→knee, knee→thigh, thigh→hip ---
             ankle_pt = [-flare, 0]
             hip_pt = [0, length]
 
-            # Outseam X at intermediate heights
-            knee_out_x = -flare * (1 - knee_y / length)
             # Thigh outseam: set so panel width at crotch_y = thigh_width.
             # At crotch_y the inseam is at hips+crotch_ext (crotch endpoint),
             # and outseam ≈ thigh_out_x (only 2cm above on the Bezier).
             thigh_out_x = (hips + crotch_extention) - thigh_width
+            # Knee outseam X: baseline (linear taper) by default; the SYMKNEE
+            # module flag (set from garment config `symknee` field) switches to
+            # centered-knee placement (knee centered between ankle midpoint and
+            # thigh midpoint).
+            if SYMKNEE:
+                _y_ankle = min(0, length - crotch_depth_diff * 1.5)
+                _ankle_in_x = (hips + crotch_extention) - 2 + flare
+                _ankle_center = (-flare + _ankle_in_x) / 2
+                _thigh_center = thigh_out_x + thigh_width / 2
+                _t = (knee_y - _y_ankle) / (thigh_y - _y_ankle)
+                _knee_center = _ankle_center + _t * (_thigh_center - _ankle_center)
+                knee_out_x = _knee_center - knee_width / 2
+            else:
+                knee_out_x = -flare * (1 - knee_y / length)
 
             knee_pt_out = [knee_out_x, knee_y]
             thigh_pt_out = [thigh_out_x, thigh_y]
@@ -101,6 +136,38 @@ class PantPanel(pyg.Panel):
                 target_tan0=np.array([0, 1]),
                 initial_guess=[0.5, 0]
             )
+
+            # --- Barrel bow (arc_follow) ---
+            # When barrel_bow is set the outseam becomes a single convex arc
+            # (ankle→waist, bulging through a knee-height bow point) and the
+            # INNER edge follows it so every girth stays exact (girth = inner −
+            # outer width). The crotch / inner-thigh shifts outward as the outer
+            # arc bulges → the legs splay: a true barrel inside and out, like the
+            # ghost. inner_dx(y) = arc(y) − girth-correct-reference(y) is the
+            # outward shift applied to the crotch and inseam below. barrel_bow is
+            # the bulge DEPTH (offset = barrel_bow·length); the apex sits at the
+            # knee height (knee_y, from the Knee_from_crotch measurement).
+            outseam_leg = [right_ankle_to_knee, right_knee_to_thigh, right_thigh_to_hip]
+            outseam_led_knee_x = None
+            inner_dx = None   # set when barrel_bow: shift the inner edge to follow the arc
+            if barrel_bow:
+                cx = (ankle_pt[0] + (thigh_pt_out[0] - ankle_pt[0])
+                      * (knee_y - ankle_pt[1]) / (thigh_pt_out[1] - ankle_pt[1]))
+                knee_bow_x = cx - barrel_bow * length
+                outseam_led_knee_x = knee_bow_x
+                waist_corner = [hw_shift, length + hips_depth]
+                right_top = pyg.CurveEdgeFactory.curve_3_points(
+                    list(ankle_pt), waist_corner, [knee_bow_x, knee_y])
+                outseam_leg = []
+                _ac = right_top.as_curve()
+                _AP = np.array([[_ac.point(t).real, _ac.point(t).imag]
+                                for t in np.linspace(0, 1, 200)])
+                _AP = _AP[np.argsort(_AP[:, 1])]
+                _refy = np.array([ankle_pt[1], knee_y, thigh_y, length, waist_corner[1]])
+                _refx = np.array([ankle_pt[0], knee_bow_x, thigh_out_x, 0.0, waist_corner[0]])
+                def inner_dx(y, _AP=_AP, _refy=_refy, _refx=_refx):
+                    return (float(np.interp(y, _AP[:, 1], _AP[:, 0]))
+                            - float(np.interp(y, _refy, _refx)))
         else:
             # Original single-curve outseam
             if pyg.utils.close_enough(design['flare']['v'], 1):  # skip optimization
@@ -128,32 +195,141 @@ class PantPanel(pyg.Panel):
             [w_diff + waist, length + hips_depth]
         )
 
-        crotch_top = pyg.Edge(
-            top.end,
-            [hips, length + 0.45 * hips_depth]  # A bit higher than hip line
-            # NOTE: The point should be lower than the minimum rise value (0.5)
-        )
+        # arc_follow shifts the inner (crotch) edge outward to track the bulging
+        # outer arc, so the hip/thigh girths stay correct (legs splay).
+        _ct_y = length + 0.45 * hips_depth
+        _cb_y = length - crotch_depth_diff
+        # _ct_y is ABOVE the crotch tip — here the inner edge is the center
+        # (rise) seam, not the inseam, so it must NOT take the leg's inner-follow
+        # shift (that pulls the hip in by ~4-5 cm). Only the crotch TIP (_cb_y, in
+        # the leg region) follows the arc, to hold the thigh girth.
+        _ct_dx = 0.0
+        _cb_dx = inner_dx(_cb_y) if inner_dx is not None else 0.0
+        # CLO-match: bow the upper rise (crotch_top) outward instead of a straight
+        # edge, to reproduce CLO's curved front-fly / back-rise line. Gated; the
+        # default path keeps the original straight Edge untouched.
+        _crz = design.get('clo_match', {}) if isinstance(design.get('clo_match'), dict) else {}
+        _bow = float(_crz.get('front_rise_bow', 3.0))
+        if clo_match and 'pant_f' in name and _bow > 0.05:
+            _s = np.asarray(top.end, float)
+            _e = np.array([hips + _ct_dx, _ct_y], float)
+            _ch = _e - _s
+            _perp = np.array([-_ch[1], _ch[0]], float)
+            if _perp[0] < 0:
+                _perp = -_perp            # bow toward +x (outward, crotch side)
+            _perp /= np.linalg.norm(_perp)
+            crotch_top = pyg.CurveEdgeFactory.curve_3_points(
+                list(_s), list(_e), list((_s + _e) / 2 + _bow * _perp))
+        else:
+            crotch_top = pyg.Edge(
+                top.end,
+                [hips + _ct_dx, _ct_y]  # A bit higher than hip line
+                # NOTE: The point should be lower than the minimum rise value (0.5)
+            )
         crotch_bottom = pyg.CurveEdgeFactory.curve_from_tangents(
             crotch_top.end,
-            [hips + crotch_extention, length - crotch_depth_diff],
+            [hips + crotch_extention + _cb_dx, _cb_y],
             target_tan0=np.array([0, -1]),
             target_tan1=np.array([1, 0]),
             initial_guess=[0.5, -0.5]
         )
         crotch_bottom.label = 'pants_crotch'
 
+        # arc_follow shifts the crotch point laterally, which shortens the crotch
+        # (rise) seam. Restore the rise: re-deepen crotch_bottom (bow it out, same
+        # endpoints) until crotch_top+crotch_bottom length matches the UNSHIFTED
+        # seam. The crotch point is shared by the thigh cross-section and the rise,
+        # so this decouples them — thigh stays put, rise comes back.
+        if inner_dx is not None:
+            _ref_ct = pyg.Edge(top.end, [hips, _ct_y])
+            _ref_cb = pyg.CurveEdgeFactory.curve_from_tangents(
+                [hips, _ct_y], [hips + crotch_extention, _cb_y],
+                target_tan0=np.array([0, -1]), target_tan1=np.array([1, 0]),
+                initial_guess=[0.5, -0.5])
+            _target = _ref_ct.length() + _ref_cb.length()
+            _cb_s = np.asarray(crotch_top.end, float)
+            _cb_e = np.array([hips + crotch_extention + _cb_dx, _cb_y], float)
+            if crotch_top.length() + crotch_bottom.length() < _target - 0.05:
+                # Deepen by offsetting the mid PERPENDICULAR to the chord (keeps the
+                # projection at 0.5 so curve_3_points stays valid). Bulge toward −x
+                # (outward, like the original crotch curve).
+                _chord = _cb_e - _cb_s
+                _perp = np.array([-_chord[1], _chord[0]])
+                if _perp[0] > 0:
+                    _perp = -_perp
+                _perp = _perp / np.linalg.norm(_perp)
+                _cmid = (_cb_s + _cb_e) / 2
+                _lo, _hi = 0.0, 40.0
+                for _ in range(22):
+                    _dd = (_lo + _hi) / 2
+                    _t = pyg.CurveEdgeFactory.curve_3_points(
+                        list(_cb_s), list(_cb_e), list(_cmid + _dd * _perp))
+                    if crotch_top.length() + _t.length() < _target:
+                        _lo = _dd
+                    else:
+                        _hi = _dd
+                crotch_bottom = pyg.CurveEdgeFactory.curve_3_points(
+                    list(_cb_s), list(_cb_e), list(_cmid + ((_lo + _hi) / 2) * _perp))
+                crotch_bottom.label = 'pants_crotch'
+
+        # CLO-match: hold the rise (crotch_top + crotch_bottom) at a target length.
+        # The split rebalance drifts the rise, so re-bow crotch_bottom (endpoints
+        # fixed → thigh width unchanged) until the total rise hits the target. Any
+        # deviation from the chord only LENGTHENS, so if the straight chord already
+        # overshoots we additionally lower the crotch_top end (_ct_y) to shorten.
+        # Gated; default path is untouched.
+        if clo_match:
+            _crz2 = design.get('clo_match', {}) if isinstance(design.get('clo_match'), dict) else {}
+            _rise_tgt = float(_crz2.get('front_rise_len', 24.7) if 'pant_f' in name
+                              else _crz2.get('back_rise_len', 34.7))
+            _cb_s2 = np.asarray(crotch_top.end, float)
+            _cb_e2 = np.asarray(crotch_bottom.end, float)
+            _need = _rise_tgt - crotch_top.length()
+            _chord2 = _cb_e2 - _cb_s2
+            _chordlen = float(np.linalg.norm(_chord2))
+            # Bowing crotch_bottom (endpoints fixed → thigh untouched) can only
+            # LENGTHEN past the chord. Use it when the target needs more length
+            # (the back case). Shortening the front rise is handled upstream by
+            # pulling the crotch tip in (front_ext_frac), not here.
+            if _need > _chordlen + 0.05:
+                _perp2 = np.array([-_chord2[1], _chord2[0]], float)
+                if _perp2[0] > 0: _perp2 = -_perp2
+                _perp2 /= np.linalg.norm(_perp2)
+                _cmid2 = (_cb_s2 + _cb_e2) / 2
+                _lo2, _hi2 = 0.0, 45.0
+                for _ in range(26):
+                    _dd2 = (_lo2 + _hi2) / 2
+                    _tc = pyg.CurveEdgeFactory.curve_3_points(
+                        list(_cb_s2), list(_cb_e2), list(_cmid2 + _dd2 * _perp2))
+                    if _tc.length() < _need: _lo2 = _dd2
+                    else: _hi2 = _dd2
+                crotch_bottom = pyg.CurveEdgeFactory.curve_3_points(
+                    list(_cb_s2), list(_cb_e2), list(_cmid2 + ((_lo2 + _hi2) / 2) * _perp2))
+                crotch_bottom.label = 'pants_crotch'
+
         if use_subcurves:
             # --- Inseam with 3 subcurves: crotch→thigh, thigh→knee, knee→ankle ---
-            # Inseam X at intermediate heights = outseam_x + target_width
+            # Inseam X at intermediate heights = outseam_x + target_width.
+            # When barrel_bow (arc_follow) is set, the outseam knee is the
+            # smooth-arc x (not the pin), so the inseam follows it via inner_dx
+            # to hold the knee/thigh girths.
             thigh_in_x = thigh_out_x + thigh_width
-            knee_in_x = knee_out_x + knee_width
+            if inner_dx is not None:        # arc_follow: inseam follows the arc
+                thigh_in_x += inner_dx(thigh_y)
+            knee_base_x = outseam_led_knee_x if outseam_led_knee_x is not None else knee_out_x
+            knee_in_x = knee_base_x + knee_width
 
             thigh_pt_in = [thigh_in_x, thigh_y]
             knee_pt_in = [knee_in_x, knee_y]
 
-            # Ankle inseam point (same formula as original)
+            # Ankle inseam point (same formula as original). Use the UNSHIFTED
+            # crotch base (crotch_bottom.end already carries the arc_follow
+            # crotch shift _cb_dx) plus the arc's own ≈0 shift at the ankle, so
+            # the crotch shift doesn't leak down and shrink the ankle opening.
             y_ankle = min(0, length - crotch_depth_diff * 1.5)
-            ankle_in_x = crotch_bottom.end[0] - 2 + flare
+            ankle_in_x = crotch_bottom.end[0] - _cb_dx - 2 + flare
+            if inner_dx is not None:
+                ankle_in_x += inner_dx(y_ankle)
             ankle_pt_in = [ankle_in_x, y_ankle]
 
             # Inseam tangent at knee junction (catmull-rom: prev→next)
@@ -192,11 +368,12 @@ class PantPanel(pyg.Panel):
                 left_crotch_to_thigh, left_thigh_to_knee, left_knee_to_ankle)
 
             self.edges = pyg.EdgeSequence(
-                right_ankle_to_knee, right_knee_to_thigh, right_thigh_to_hip,
+                *outseam_leg,
                 right_top, top, crotch_top, crotch_bottom,
                 *inseam_edges
             ).close_loop()
             bottom = self.edges[-1]
+            bottom = self._maybe_front_slit(bottom, front_slit)
 
             # Default placement
             self.set_pivot(crotch_bottom.end)
@@ -206,9 +383,8 @@ class PantPanel(pyg.Panel):
             self.interfaces = {
                 'outside': pyg.Interface(
                     self,
-                    pyg.EdgeSequence(right_ankle_to_knee, right_knee_to_thigh,
-                                     right_thigh_to_hip, right_top),
-                    ruffle=[1, 1, 1, hipline_ext]),
+                    pyg.EdgeSequence(*outseam_leg, right_top),
+                    ruffle=[1] * len(outseam_leg) + [hipline_ext]),
                 'crotch': pyg.Interface(self, pyg.EdgeSequence(crotch_top, crotch_bottom)),
                 'inside': pyg.Interface(self, inseam_edges),
                 'bottom': pyg.Interface(self, bottom)
@@ -235,6 +411,7 @@ class PantPanel(pyg.Panel):
                 right_bottom, right_top, top, crotch_top, crotch_bottom, left
                 ).close_loop()
             bottom = self.edges[-1]
+            bottom = self._maybe_front_slit(bottom, front_slit)
 
             # Default placement
             self.set_pivot(crotch_bottom.end)
@@ -269,6 +446,24 @@ class PantPanel(pyg.Panel):
         ) 
         
         
+
+    def _maybe_front_slit(self, bottom, front_slit):
+        """Cut a thin V-notch (front split) into the ankle edge midpoint.
+        Returns the (possibly replaced) bottom interface edge sequence.
+        Same cutout mechanism as panel-skirt slits (pyg.ops.cut_into_edge).
+        No-op when front_slit is falsy.
+        """
+        if not front_slit:
+            return bottom
+        depth = min(float(front_slit), bottom.length() * 0.45)  # keep inside leg
+        new_edges, _, int_edges = pyg.ops.cut_into_edge(
+            pyg.EdgeSeqFactory.dart_shape(2, depth=depth),
+            bottom,
+            offset=bottom.length() / 2,
+            right=True,
+        )
+        self.edges.substitute(bottom, new_edges)
+        return int_edges
 
     def add_darts(self, top, dart_width, dart_depth, dart_position, double_dart=False):
         
@@ -330,9 +525,12 @@ class PantsHalf(BaseBottoms):
 
         length, cuff_len = design['length']['v'], design['cuff']['cuff_len']['v']
         if design['cuff']['type']['v']:
-            if length - cuff_len < design['length']['range'][0]:   # Min length from paramss
+            # Min length from params. Mapper-built designs carry only {'v': ...}
+            # (no 'range'), so fall back to a small floor in that case.
+            min_length = design['length'].get('range', [0.2])[0]
+            if length - cuff_len < min_length:
                 # Cannot be longer then a pant
-                cuff_len = length - design['length']['range'][0]
+                cuff_len = length - min_length
             # Include the cuff into the overall length,
             # unless the requested length is too short to fit the cuff
             # (to avoid negative length)
@@ -346,6 +544,24 @@ class PantsHalf(BaseBottoms):
 
         # Thigh/knee width controls (if body measurements available)
         back_hip = body['hip_back_width'] / 2 * width_v
+
+        # --- CLO-match path (opt-in via design['clo_match']['v']) ---------------
+        # Rebalances the front/back split forward and widens the crotch extension
+        # to reproduce CLO's more balanced front/back distribution. Gated: when the
+        # flag is absent/false this block is skipped and behaviour is unchanged.
+        clo_match = bool(design.get('clo_match', {}).get('v', False)) \
+            if isinstance(design.get('clo_match'), dict) else False
+        if clo_match:
+            clo_cfg = design.get('clo_match', {})
+            front_frac = float(clo_cfg.get('front_frac', 0.46))   # hip front share
+            ext_frac = float(clo_cfg.get('front_ext_frac', 0.46)) # crotch-ext front share
+            _tot_hip = front_hip + back_hip
+            front_hip = _tot_hip * front_frac
+            back_hip = _tot_hip * (1.0 - front_frac)
+            front_extention = crotch_extention * ext_frac
+            back_extention = crotch_extention - front_extention
+        # ------------------------------------------------------------------------
+
         leg_shape_kwargs = {}
         if 'thigh_circ' in body and 'knee_circ' in body:
             thigh_v = design.get('thigh', {}).get('v', 1.0)
@@ -407,6 +623,10 @@ class PantsHalf(BaseBottoms):
                     'back_knee': knee_circ * (1 - knee_front_ratio),
                 }
 
+        front_slit = design.get('front_slit', {}).get('v') if isinstance(design.get('front_slit'), dict) else None
+        # Barrel bow: outseam-trajectory shaping, opt-in per config. Absent in
+        # mapper-built designs, so existing (non-barrel) configs are unaffected.
+        barrel_bow = design.get('barrel_bow', {}).get('v') if isinstance(design.get('barrel_bow'), dict) else None
         self.front = PantPanel(
             f'pant_f_{tag}', body, design,
             length=length,
@@ -420,6 +640,9 @@ class PantsHalf(BaseBottoms):
             knee_width=leg_shape_kwargs.get('front_knee'),
             knee_y=leg_shape_kwargs.get('knee_y'),
             thigh_y=leg_shape_kwargs.get('thigh_y'),
+            front_slit=front_slit,
+            barrel_bow=barrel_bow,
+            clo_match=clo_match,
             ).translate_by([0, body['_waist_level'] - 5 + rise_offset, 25])
         self.back = PantPanel(
             f'pant_b_{tag}', body, design,
@@ -436,6 +659,8 @@ class PantsHalf(BaseBottoms):
             knee_width=leg_shape_kwargs.get('back_knee'),
             knee_y=leg_shape_kwargs.get('knee_y'),
             thigh_y=leg_shape_kwargs.get('thigh_y'),
+            barrel_bow=barrel_bow,
+            clo_match=clo_match,
             ).translate_by([0, body['_waist_level'] - 5 + rise_offset, -20])
 
         self.stitching_rules = pyg.Stitches(
@@ -454,19 +679,30 @@ class PantsHalf(BaseBottoms):
             # Copy to avoid editing original design dict
             cdesign = deepcopy(design)
             cdesign['cuff']['b_width'] = {}
-            cdesign['cuff']['b_width']['v'] = pant_bottom.edges.length() / design['cuff']['top_ruffle']['v']
+            # Balloon leg: a `target_width` (cm) pins the cuff circumference to
+            # a fixed value (e.g. the ankle measurement) and lets the wide leg
+            # bottom gather into it. Otherwise the cuff width is derived from
+            # top_ruffle (the original gathered-by-ratio behaviour).
+            cuff_target = design['cuff'].get('target_width')
+            if isinstance(cuff_target, dict) and cuff_target.get('v'):
+                cdesign['cuff']['b_width']['v'] = float(cuff_target['v'])
+            else:
+                cdesign['cuff']['b_width']['v'] = pant_bottom.edges.length() / design['cuff']['top_ruffle']['v']
             cdesign['cuff']['cuff_len']['v'] = cuff_len
 
             # Init
             cuff_class = getattr(bands, cdesign['cuff']['type']['v'])
             self.cuff = cuff_class(f'pant_{tag}', cdesign)
 
-            # Position
+            # Position. Center the cuff on the leg tube (coaxial). For a
+            # balloon leg the cuff is much narrower than the wide leg opening,
+            # so edge alignment ('left') would shove the cuff to one side and
+            # the gather would wrap unevenly; 'center' keeps it concentric.
             self.cuff.place_by_interface(
                 self.cuff.interfaces['top'],
                 pant_bottom,
                 gap=5,
-                alignment='left'
+                alignment='center'
             )
 
             # Stitch
@@ -522,3 +758,6 @@ class Pants(BaseBottoms):
     def length(self):
         return self.right.length()
 
+
+# GT-driven pants (opt-in via meta.bottom == PantsCLO); see pants_clo.py
+from assets.garment_programs.pants_clo import PantsCLO, PantsHalfCLO, PantPanelCLO

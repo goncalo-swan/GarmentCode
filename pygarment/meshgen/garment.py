@@ -83,6 +83,17 @@ class Cloth:
         self.integrator = wp.sim.XPBDIntegrator() #intialize semi-implicit time-integrator
         self.state_0 = self.model.state() #returns state object for model (holds all *time-varying* data for a model)
         self.state_1 = self.model.state() #i.e. body/particle positions and velocities
+
+        # Auto pre-shift: override initial particle positions to the compressed
+        # state computed in build_stage. Edge rest lengths in the model are
+        # still natural, so springs pull fabric toward natural during sim.
+        if getattr(self, '_compressed_initial_q', None) is not None:
+            n = self._compressed_initial_q.shape[0]
+            arr = wp.array(self._compressed_initial_q.astype(np.float32),
+                           dtype=wp.vec3, device=self.device)
+            wp.copy(self.state_0.particle_q, arr, count=n)
+            wp.copy(self.state_1.particle_q, arr, count=n)
+
         if self.caching:
             self.renderer = wp.sim.render.SimRenderer(self.model, str(paths.usd), scaling=1.0)
 
@@ -118,6 +129,57 @@ class Cloth:
         cloth_vertices = cloth_vertices * self.c_scale
         if self.shift_y:
             cloth_vertices[:, 1] = cloth_vertices[:, 1] + self.shift_y
+
+        # Auto pre-shift: when the garment's lower hem would start below the
+        # floor (e.g. pants with inseam exceeding the body's crotch height),
+        # compress the lower-body portion vertically so the cuff starts ~1 cm
+        # above floor for clean stitching. The compression is only applied to
+        # the INITIAL particle state (state_0.particle_q below) — natural
+        # cloth_vertices are still passed to the builder so edge rest lengths
+        # remain at the pattern's true lengths. During sim the springs pull
+        # the fabric back toward natural, with excess inseam puddling at the
+        # floor under gravity.
+        # Compression spreads across the whole garment below body_crotch_Y,
+        # so per-edge shrink is small and fabric doesn't get stuck on itself.
+        # Disable per-config via sim props options.auto_pre_lift_enabled = false
+        # or by setting auto_pre_lift_clearance = 0.
+        self._compressed_initial_q = None
+        try:
+            auto_clearance = float(
+                getattr(config, 'auto_pre_lift_clearance', 1.0) or 0)
+            auto_enabled = bool(
+                getattr(config, 'auto_pre_lift_enabled', True))
+        except Exception:
+            auto_clearance, auto_enabled = 1.0, True
+        if auto_enabled and auto_clearance > 0:
+            cloth_min_y = float(cloth_vertices[:, 1].min())
+            if cloth_min_y < 0:
+                with open(self.paths.in_body_mes, 'r') as _bf:
+                    bd = yaml.safe_load(_bf)['body']
+                wl = bd.get('_waist_level',
+                            bd['height'] - bd['head_l'] - bd['waist_line'])
+                body_crotch_Y = self._crotch_y_smpl_or(
+                    wl - bd.get('hips_line', 22.0) - bd.get('crotch_hip_diff', 8.0))
+                mask = cloth_vertices[:, 1] < body_crotch_Y
+                if mask.any():
+                    vy_min = cloth_vertices[mask, 1].min()
+                    if vy_min < 0:
+                        span_orig = body_crotch_Y - vy_min
+                        span_new = body_crotch_Y - auto_clearance
+                        if span_orig > 0.1 and span_new > 0.1:
+                            ratio = span_new / span_orig
+                            compressed = cloth_vertices.copy()
+                            compressed[mask, 1] = (
+                                auto_clearance
+                                + (compressed[mask, 1] - vy_min) * ratio)
+                            self._compressed_initial_q = compressed
+                            print(f'  AUTO PRE-LIFT: hem at Y={vy_min:.2f} '
+                                  f'below floor — initial-state remap of '
+                                  f'{mask.sum()} verts in '
+                                  f'[{vy_min:.1f}, {body_crotch_Y:.1f}] -> '
+                                  f'[{auto_clearance:.1f}, {body_crotch_Y:.1f}] '
+                                  f'(compression {1-ratio:.0%}); rest lengths natural')
+
         self.v_cloth_init = cloth_vertices
         self.f_cloth = cloth_faces
 
@@ -175,32 +237,60 @@ class Cloth:
             self.body_vertices_device_buffer = wp.array(body_vertices, dtype=wp.vec3, device=self.device)
             self.v_body = body_vertices
         
-        # Shrink foot vertices during zero-gravity so the foot does not
-        # block the Z-axis convergence of front/back panels.  Foot verts
-        # are blended towards the ankle centre (95% blend to keep valid
-        # triangles); they are restored when gravity activates (see update()).
-        foot_y_threshold = body_vertices[:, 1].max() * 0.06  # ~6% of height ≈ foot top
-        self._foot_mask = body_vertices[:, 1] < foot_y_threshold
-        self._body_verts_original = body_vertices.copy()
-        if self._foot_mask.any():
-            # Ankle ring: vertices just above the foot
-            ankle_band = (body_vertices[:, 1] >= foot_y_threshold) & \
-                         (body_vertices[:, 1] < foot_y_threshold * 1.5)
-            if ankle_band.any():
-                ankle_center = body_vertices[ankle_band].mean(axis=0)
-            else:
-                ankle_center = body_vertices[~self._foot_mask].mean(axis=0)
-            # Shrink foot towards ankle center (keep 5% spread for valid tris)
-            body_vertices = body_vertices.copy()
-            body_vertices[self._foot_mask] = (
-                ankle_center + 0.05 * (body_vertices[self._foot_mask] - ankle_center)
-            )
+        # Foot-shrink logic disabled: collapsing foot vertices during zero-gravity
+        # caused cuff clipping for short bodies (cuff settled inside the foot Y
+        # zone; frame-150 snap-back punched fabric out, producing self-collisions
+        # and slow settling). With body collision filters in place the panels
+        # converge fine without shrinking the feet.
+        # foot_y_threshold = body_vertices[:, 1].max() * 0.06  # ~6% of height ≈ foot top
+        # self._foot_mask = body_vertices[:, 1] < foot_y_threshold
+        # self._body_verts_original = body_vertices.copy()
+        # if self._foot_mask.any():
+        #     # Ankle ring: vertices just above the foot
+        #     ankle_band = (body_vertices[:, 1] >= foot_y_threshold) & \
+        #                  (body_vertices[:, 1] < foot_y_threshold * 1.5)
+        #     if ankle_band.any():
+        #         ankle_center = body_vertices[ankle_band].mean(axis=0)
+        #     else:
+        #         ankle_center = body_vertices[~self._foot_mask].mean(axis=0)
+        #     # Shrink foot towards ankle center (keep 5% spread for valid tris)
+        #     body_vertices = body_vertices.copy()
+        #     body_vertices[self._foot_mask] = (
+        #         ankle_center + 0.05 * (body_vertices[self._foot_mask] - ankle_center)
+        #     )
+        self._foot_mask = np.zeros(len(body_vertices), dtype=bool)
 
         if not hasattr(self, 'body_vertices_device_buffer'):
             self.body_vertices_device_buffer = wp.array(
                 body_vertices, dtype=wp.vec3, device=self.device)
 
         self.body_mesh = wp.sim.Mesh(body_vertices, body_indices)
+
+        # ----- Body pose animation (optional) -----
+        # Step the body through a pose sequence during the sim so the cloth
+        # tracks it. Stored as DELTAS off the current (base) body, so any global
+        # shift the sim applied to the body is preserved. Frames are scaled
+        # METRES->cm to match body_vertices (which were scaled by b_scale).
+        self._pose_anim = bool(getattr(config, 'pose_animation_npy', None))
+        if self._pose_anim:
+            seq = np.load(config.pose_animation_npy)  # (N, n_verts, 3) metres
+            self._pose_body_base = np.asarray(body_vertices, dtype=np.float64)
+            self._pose_delta = (seq - seq[0]).astype(np.float64) * self.b_scale
+            gap = int(config.pose_animation_frame_gap)
+            start = int(config.pose_animation_start_frame)
+            self._pose_anim_frames = [start + gap * i for i in range(len(seq))]
+            self._pose_idx = 0
+            pose_end = self._pose_anim_frames[-1]
+            # End the sim a fixed N frames after the last pose step. Gravity is on
+            # during reposing so the garment is settled by pose_end; extra settling
+            # only lets it creep down a tilted pose. Also raise the static-check
+            # floor so it can't stop mid-animation.
+            settle = int(getattr(config, 'pose_animation_settle_frames', 30))
+            config.max_sim_steps = pose_end + settle
+            config.min_sim_steps = max(getattr(config, 'min_sim_steps', 0) or 0, pose_end + 1)
+            print(f'  POSE ANIMATION: {len(seq)} frames, step every {gap} from '
+                  f'frame {start} (ends {pose_end}); sim auto-stops at '
+                  f'{config.max_sim_steps} (+{settle} settle)')
 
         body_pos = wp.vec3(0.0, 0, 0.0)
         body_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.degrees(0.0))
@@ -269,7 +359,29 @@ class Cloth:
             face_filters=face_filters if face_filters else [[]],
             model_particle_filter_ids = particle_filter,
         )
-        
+
+        # ----- Extra static collider (layered outfits) -------
+        # An already-draped inner garment, frozen as a static obstacle so the
+        # current (outer) garment drapes over it. Loaded in cm (body frame), so
+        # NO b_scale is applied (unlike the body OBJ, which is in meters).
+        static_obj = getattr(config, 'static_collision_obj', None)
+        if static_obj:
+            sc_v, sc_inds, _ = self.load_obj(static_obj)
+            self.static_collider_mesh = wp.sim.Mesh(sc_v, sc_inds)
+            sc_mu = getattr(config, 'static_collision_friction', None)
+            if sc_mu is None:
+                sc_mu = config.body_friction
+            builder.add_shape_mesh(
+                body=-1,
+                mesh=self.static_collider_mesh,
+                pos=body_pos,
+                rot=body_rot,
+                scale=wp.vec3(1.0, 1.0, 1.0),
+                thickness=config.body_thickness,
+                mu=sc_mu,
+            )
+            print(f'  Added static collider ({len(sc_v)} verts) from {static_obj}')
+
         # ----- Attachment constraint -------
 
         if config.enable_attachment_constraint:
@@ -301,8 +413,31 @@ class Cloth:
             ]
         )  
 
+        # Enlarge the edge-edge contact buffer for heavy-self-contact garments
+        # (deep barrels) that overflow it at stitch init and crash with a CUDA
+        # illegal-memory-access. builder.edge_contact_max is per-spring and gets
+        # multiplied by spring_count in finalize(); scale it by the configured
+        # factor (default 1 = warp default). Must be set BEFORE finalize.
+        _ecm = getattr(config, 'edge_contact_mult', 1) or 1
+        if _ecm != 1:
+            builder.edge_contact_max = int(builder.edge_contact_max * _ecm)
+
         # ------- Finalize --------------
         self.model: wp.sim.Model = builder.finalize(device = self.device) #data is transferred to warp tensors, object used in simulation
+
+    def _crotch_y_smpl_or(self, formula):
+        """Body crotch Y: SMPL crotch landmark vertex 1210 (floor-relative) if
+        the body mesh is SMPL (6890 verts), else the provided formula value.
+        Matches the placement anchor in run_custom_pants — the measurement
+        formula underestimates the true SMPL crotch by a height-dependent
+        ~3-4.5cm."""
+        try:
+            bv = self.v_body
+            if bv is not None and len(bv) == 6890:
+                return float(bv[1210, 1] - bv[:, 1].min())
+        except Exception:
+            pass
+        return formula
 
     def _add_attachment_labels(self, builder, config):
         with open(self.paths.in_body_mes, 'r') as file:
@@ -405,7 +540,8 @@ class Cloth:
                                        - body_dict['waist_line'])
                     hips_line = body_dict.get('hips_line', 22.0)
                     crotch_hip_diff = body_dict.get('crotch_hip_diff', 8.0)
-                    target_y = waist_level - hips_line - crotch_hip_diff
+                    target_y = self._crotch_y_smpl_or(
+                        waist_level - hips_line - crotch_hip_diff)
                     builder.add_attachment(
                         constaint_verts,
                         wp.vec3(0, target_y, 0),
@@ -504,14 +640,18 @@ class Cloth:
                 self.model.particle_grid.build(self.state_0.particle_q, self.model.particle_max_radius * 2.0)
             if frame == self.zero_gravity_steps:
                 self.model.gravity = np.array((0.0, -9.81, 0.0))
-                # Restore original body (with feet) now that panels have
-                # converged into closed tubes during zero-gravity.
-                if hasattr(self, '_body_verts_original') and self._foot_mask.any():
-                    self._restore_body_feet()
+                # Foot-restore disabled (companion to disabled foot-shrink above).
+                # if hasattr(self, '_body_verts_original') and self._foot_mask.any():
+                #     self._restore_body_feet()
                 if self.sim_use_graph:
                     self.create_graph()
             if self.enable_body_smoothing and frame in self.body_smoothing_frames:
                 self.update_smooth_body_shape()
+                if self.sim_use_graph:
+                    self.create_graph()
+            if (self._pose_anim and self._pose_idx < len(self._pose_delta)
+                    and frame in self._pose_anim_frames):
+                self._apply_pose_frame()
                 if self.sim_use_graph:
                     self.create_graph()
             if (self.model.attachment_constraint 
@@ -531,20 +671,20 @@ class Cloth:
             # NOTE Makes a copy if particle_q device is not CPU
             self.current_verts = wp.array.numpy(self.state_0.particle_q)  
             
-    def _restore_body_feet(self):
-        """Restore original body vertices (with feet) after zero-gravity."""
-        body_vertices = self._body_verts_original
-        self.v_body = body_vertices
-        wp.copy(self.body_vertices_device_buffer,
-                wp.array(body_vertices, dtype=wp.vec3, device='cpu', copy=False))
-        wp.launch(
-            kernel=replace_mesh_points,
-            dim=len(body_vertices),
-            inputs=[self.body_mesh.mesh.id,
-                    self.body_vertices_device_buffer],
-            device=self.device
-        )
-        self.body_mesh.mesh.refit()
+    # def _restore_body_feet(self):
+    #     """Restore original body vertices (with feet) after zero-gravity."""
+    #     body_vertices = self._body_verts_original
+    #     self.v_body = body_vertices
+    #     wp.copy(self.body_vertices_device_buffer,
+    #             wp.array(body_vertices, dtype=wp.vec3, device='cpu', copy=False))
+    #     wp.launch(
+    #         kernel=replace_mesh_points,
+    #         dim=len(body_vertices),
+    #         inputs=[self.body_mesh.mesh.id,
+    #                 self.body_vertices_device_buffer],
+    #         device=self.device
+    #     )
+    #     self.body_mesh.mesh.refit()
 
     def update_smooth_body_shape(self):
         body_vertices = self.body_smoothing_vertices_list.pop()
@@ -561,6 +701,23 @@ class Cloth:
             device=self.device
         )
         self.body_mesh.mesh.refit()
+
+    def _apply_pose_frame(self):
+        """Advance the body one step along the pose-animation sequence and refit
+        the collision mesh, so the cloth tracks the moving body."""
+        body_vertices = self._pose_body_base + self._pose_delta[self._pose_idx]
+        self.v_body = body_vertices
+        self.body_vertices_device_buffer = wp.array(
+            body_vertices, dtype=wp.vec3, device=self.device)
+        wp.launch(
+            kernel=replace_mesh_points,
+            dim=len(body_vertices),
+            inputs=[self.body_mesh.mesh.id,
+                    self.body_vertices_device_buffer],
+            device=self.device,
+        )
+        self.body_mesh.mesh.refit()
+        self._pose_idx += 1
 
         #update render
         if self.caching: 

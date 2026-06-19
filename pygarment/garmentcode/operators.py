@@ -97,14 +97,29 @@ def cut_corner(target_shape: EdgeSequence, target_interface: Interface,
     loc = out.x
     point1 = c_to_list(curve1.point(loc[0]))
     # re-align corner_shape with found shifts
-    corner_shape.snap_to(point1)   
-    
+    corner_shape.snap_to(point1)
+
     # ----- UPD panel ----
     # Complete to the full corner -- connect with the initial vertices
     if swaped:
         # The edges are aligned as v2 -> vc -> v1
         corner_shape.reverse()
         loc[0], loc[1] = loc[1], loc[0]
+
+    # Adaptive eps applied AFTER swap so each clamp is sized to the edge
+    # actually being subdivided. subdivide_param's sub-edges must keep both
+    # coordinate diffs above close_enough tol (1e-4) or Edge.__init__ asserts.
+    # For a sub-edge of length L the smallest coord diff is L/sqrt(2), so we
+    # need L > sqrt(2)*tol ≈ 1.4e-4. We pick eps = 2e-4 / edge_length per edge.
+    # Tiny sub-edges that survive become CDT-disconnected fragments and are
+    # dropped downstream in boxmeshgen.gen_panel_mesh.
+    _min_subedge_cm = 2e-4
+    e0_len = max(target_edges[0].length(), 1e-3)
+    e1_len = max(target_edges[1].length(), 1e-3)
+    _eps0 = max(1e-5, _min_subedge_cm / e0_len)
+    _eps1 = max(1e-5, _min_subedge_cm / e1_len)
+    loc = [min(max(loc[0], _eps0), 1 - _eps0),
+           min(max(loc[1], _eps1), 1 - _eps1)]
 
     # Insert a new shape
     cut_edge1, _ = target_edges[0].subdivide_param([loc[0], 1-loc[0]])

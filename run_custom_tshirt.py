@@ -83,8 +83,21 @@ def map_production_to_design(prod, body_yaml_path):
     garment_measurements = {
         'bust_circumference': bust_circ,
         'length': back_length,
-        'hps_to_cuff': prod['Arm_Length'],  # Full HPS-to-cuff (I)
     }
+
+    # Sleeve length. Two techpack conventions are supported:
+    #   Arm_Length    = HPS-to-cuff (over the shoulder, down the arm). The
+    #                   mapper subtracts the body shoulder seam internally.
+    #   Sleeve_Length = SLEEVELENGTH measured from the shoulder point to the
+    #                   cuff. This is the sleeve's own length; the shoulder
+    #                   seam is built by the torso, so it must NOT be added
+    #                   again. Prefer this when the card lists SHOULDER and
+    #                   SLEEVELENGTH separately (summing them double-counts
+    #                   the shoulder and runs the cuff past the wrist).
+    if 'Sleeve_Length' in prod:
+        garment_measurements['sleeve_from_shoulder'] = prod['Sleeve_Length']
+    elif 'Arm_Length' in prod:
+        garment_measurements['hps_to_cuff'] = prod['Arm_Length']
 
     # Collar: use actual production values when available, fall back to ratios
     if 'Front_Neck_Drop' in prod:
@@ -104,7 +117,25 @@ def map_production_to_design(prod, body_yaml_path):
     if 'Sleeve_Opening' in prod:
         garment_measurements['sleeve_opening_circ'] = prod['Sleeve_Opening']
 
+    # Hem: full circumference (cm). Prefer `Hem` (canonical name across pants/
+    # skirt/top configs); accept `Hem_Width` for backwards compatibility — note
+    # that older configs stored Hem_Width as the *half* measurement, so when
+    # only the legacy field is present it's doubled before consumption.
+    if 'Hem' in prod:
+        garment_measurements['hem_circumference'] = prod['Hem']
+    elif 'Hem_Width' in prod:
+        garment_measurements['hem_circumference'] = prod['Hem_Width'] * 2
+
+    # Bicep: full circumference at the cap. If provided, override the mapper's
+    # body-derived armhole estimate so the cap width matches the brand target.
+    if 'Bicep' in prod:
+        garment_measurements['bicep_circumference'] = prod['Bicep']
+
     design = mapper.map_shirt(garment_measurements)
+    # Pass raw techpack values through so generate_pattern can apply targets
+    # the mapper doesn't handle (e.g. a fitted blazer's target waist, which
+    # should override the body waist that drives dart suppression).
+    design['_production_cm'] = dict(prod)
     return design
 
 
@@ -117,6 +148,31 @@ def generate_pattern(size, design, body_yaml_path, output_base,
     garment_name = f'{garment_prefix}_size{size}'
 
     body = BodyParameters(body_yaml_path)
+
+    # Optional target overrides: the fitted bodice shapes waist suppression
+    # from body.waist, and a stacked skirt bottom (e.g. a hip-length blazer's
+    # peplum) sizes its hip from body.hips. For garments whose techpack
+    # specifies these, override the body values (the fitted bodice itself does
+    # NOT use body.hips, so the hip override only affects the stacked bottom).
+    # Back-width fields scale proportionally to preserve the front/back split.
+    prod = design.get('_production_cm', {})
+    target_waist = prod.get('Waist')
+    if target_waist and target_waist > 0:
+        ratio = target_waist / body.params['waist']
+        body.params['waist'] = float(target_waist)
+        if 'waist_back_width' in body.params:
+            body.params['waist_back_width'] = float(
+                body.params['waist_back_width'] * ratio)
+        body.eval_dependencies()
+    target_hips = prod.get('Hem')
+    if target_hips and target_hips > 0:
+        ratio = target_hips / body.params['hips']
+        body.params['hips'] = float(target_hips)
+        if 'hip_back_width' in body.params:
+            body.params['hip_back_width'] = float(
+                body.params['hip_back_width'] * ratio)
+        body.eval_dependencies()
+
     garment = MetaGarment(garment_name, body, design)
     pattern = garment.assembly()
 
@@ -246,7 +302,6 @@ def repose_garment(sim_folder,
         'Body face topology mismatch between A-pose and custom pose'
 
     # For each garment vertex, find closest point on A-pose body surface.
-    # Returns: squared distances, face indices, closest points
     sq_dists, face_ids, closest_pts = igl.point_mesh_squared_distance(
         g_verts.astype(np.float64),
         a_verts.astype(np.float64),
@@ -310,6 +365,173 @@ def repose_garment(sim_folder,
     print(f'  Max displacement: {np.abs(garment_disp).max():.2f} cm')
     print(f'  Mean displacement: {np.linalg.norm(garment_disp, axis=1).mean():.2f} cm')
     return reposed_path
+
+
+def sdf_push_outward(sim_folder, target_body_obj, push_distance=1.0):
+    """Push any cloth vertex that ended up INSIDE the target body OUTWARD,
+    placing it on the surface + push_distance cm. Operates on sim.obj (and
+    overwrites it) so the next stage / render sees the corrected mesh.
+
+    Returns the number of verts pushed, or None on failure.
+    """
+    sim_folder = Path(sim_folder)
+    sim_files = list(sim_folder.glob('*_sim.obj'))
+    if not sim_files:
+        return None
+    sim_path = sim_files[0]
+    # Read cloth verts
+    cloth_verts = []
+    with open(sim_path) as f:
+        lines = f.readlines()
+    for line in lines:
+        if line.startswith('v ') and not line.startswith(('vt ', 'vn ')):
+            p = line.split()
+            cloth_verts.append((float(p[1]), float(p[2]), float(p[3])))
+    try:
+        import igl
+        target_v, target_f = _load_body_cm(target_body_obj)
+        sv = np.array(cloth_verts, dtype=np.float64)
+        sd_result = igl.signed_distance(
+            sv, target_v.astype(np.float64), target_f.astype(np.int32))
+        signed_d, _, closest = sd_result[0], sd_result[1], sd_result[2]
+        inside = signed_d < 0
+        n_inside = int(inside.sum())
+        if n_inside == 0:
+            return 0
+        outward_dir = closest[inside] - sv[inside]
+        norms = np.linalg.norm(outward_dir, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-6, 1.0, norms)
+        unit_out = outward_dir / norms
+        sv[inside] = closest[inside] + unit_out * push_distance
+        # Write back to sim.obj
+        vi = 0
+        with open(sim_path, 'w') as f:
+            for line in lines:
+                if line.startswith('v ') and not line.startswith(('vt ', 'vn ')):
+                    v = sv[vi]
+                    f.write(f'v {v[0]} {v[1]} {v[2]}\n')
+                    vi += 1
+                else:
+                    f.write(line)
+        print(f'  SDF push: {n_inside} interpenetrating verts moved out '
+              f'(max sdf inside: {-signed_d.min():.2f} cm)')
+        return n_inside
+    except Exception as e:
+        print(f'  SDF push skipped: {e}')
+        return None
+
+
+def settle_reposed(sim_folder, target_body_obj, sim_props=None,
+                   n_settle_steps=1000, apply_sdf_push=True):
+    """Short physics settle pass on the reposed cloth against the target-pose
+    body. Resolves interpenetration and lets gravity reshape folds.
+
+    Approach: overwrite the boxmesh.obj with the reposed cloth's vertex
+    positions (same topology, same vert count), point the simulator at the
+    target-pose body, and re-run sim with zero_gravity_steps=0 (cloth is
+    already in position; we only want gravity + collisions).
+    """
+    from pygarment.meshgen.simulation import run_sim
+    from pygarment.meshgen.sim_config import PathCofig
+
+    sim_folder = Path(sim_folder)
+    sim_files = list(sim_folder.glob('*_sim.obj'))
+    box_files = list(sim_folder.glob('*_boxmesh.obj'))
+    spec_files = list(sim_folder.glob('*_specification.json'))
+    if not (sim_files and box_files and spec_files):
+        print(f'  Settle skipped (missing files in {sim_folder})')
+        return None
+
+    sim_path = sim_files[0]
+    box_path = box_files[0]
+
+    # Optionally apply SDF push first (modifies sim.obj in place)
+    if apply_sdf_push:
+        sdf_push_outward(sim_folder, target_body_obj)
+
+    # Read (possibly SDF-corrected) cloth verts
+    sim_verts = []
+    with open(sim_path) as f:
+        for line in f:
+            if line.startswith('v ') and not line.startswith(('vt ', 'vn ')):
+                p = line.split()
+                sim_verts.append((float(p[1]), float(p[2]), float(p[3])))
+
+    # Overwrite boxmesh.obj vert positions with reposed positions
+    # (boxmesh shares topology with sim.obj — same vert count, same ordering)
+    with open(box_path) as f:
+        box_lines = f.readlines()
+    vi = 0
+    new_lines = []
+    for line in box_lines:
+        if line.startswith('v ') and not line.startswith(('vt ', 'vn ')):
+            v = sim_verts[vi]
+            # Boxmesh and sim.obj are both stored in cm (c_scale=1.0).
+            new_lines.append(f'v {v[0]} {v[1]} {v[2]}\n')
+            vi += 1
+        else:
+            new_lines.append(line)
+    with open(box_path, 'w') as f:
+        f.writelines(new_lines)
+    print(f'  Boxmesh overwritten with {vi} reposed verts')
+
+    # Build sim props (short settle: zero zero-gravity, short max steps)
+    if sim_props is None:
+        props = Properties('./assets/Sim_props/default_sim_props.yaml')
+    elif isinstance(sim_props, str):
+        props = Properties(sim_props)
+    else:
+        props = Properties()
+        props.properties = dict(sim_props)
+    # Allow some zero-gravity time so body collisions push trapped fabric out
+    # before gravity loads it down onto the wrong side.
+    props['sim']['config']['zero_gravity_steps'] = 300
+    props['sim']['config']['max_sim_steps'] = int(n_settle_steps)
+    props.set_section_stats(
+        'sim', fails={}, sim_time={}, spf={},
+        fin_frame={}, body_collisions={}, self_collisions={}
+    )
+
+    # Build PathCofig pointing at the target body
+    target_body_path = Path(target_body_obj).resolve()
+    # PathCofig expects body_name relative to assets/bodies/
+    bodies_root = Path('/home/swan/Desktop/goncalo/software/GarmentCode/assets/bodies').resolve()
+    try:
+        body_name = str(target_body_path.relative_to(bodies_root)).replace('.obj', '')
+    except ValueError:
+        body_name = target_body_path.stem
+    spec_file = spec_files[0]
+    in_name = spec_file.stem.replace('_specification', '')
+    out_path = sim_folder.parent
+    # PathCofig builds out_el = out_path / out_name and looks up boxmesh as
+    # out_el / f'{boxmesh_tag}_boxmesh.obj'. Our actual folder name is
+    # <in_name>_<second_ts>, while the boxmesh filename uses just in_name.
+    # Pass out_name = sim_folder.name so out_el matches the existing folder,
+    # then override boxmesh_tag to in_name so the file lookups succeed.
+    paths = PathCofig(
+        in_element_path=sim_folder,
+        out_path=out_path,
+        in_name=in_name,
+        out_name=sim_folder.name,
+        body_name=body_name,
+        smpl_body=True,
+        add_timestamp=False,
+    )
+    paths.boxmesh_tag = in_name
+    paths._update_boxmesh_paths()
+    paths.sim_tag = in_name
+    paths.update_sim_paths()
+    paths.update_in_copies_paths()
+    # Re-point spec since update_in_copies_paths uses out_el/in_tag
+    paths.in_g_spec = spec_file
+    paths.g_box_mesh = box_path
+
+    print(f'  Settling against {body_name} ({n_settle_steps} steps, no zero-gravity)...')
+    run_sim(in_name, props, paths,
+            save_v_norms=False, store_usd=False, optimize_storage=False,
+            verbose=False, save_sim_video=False)
+    print(f'  Settled garment saved (sim.obj overwritten in {sim_folder})')
+    return sim_path
 
 
 def render_reposed(sim_folder,
@@ -445,7 +667,8 @@ if __name__ == '__main__':
     generated = []
     for size in GARMENT_SIZES:
         prod = PRODUCTION_DATA[size]
-        print(f'\nSize {size}: Bust={prod["Bust"]}, Arm_Length={prod["Arm_Length"]}, '
+        _sleeve = prod.get('Sleeve_Length', prod.get('Arm_Length', 'n/a'))
+        print(f'\nSize {size}: Bust={prod["Bust"]}, Sleeve={_sleeve}, '
               f'Nape_to_Waist={prod["Nape_to_Waist"]}')
         design = map_production_to_design(prod, APOSE_BODY_YAML)
         print(f'  Design: width={design["shirt"]["width"]["v"]:.3f}, '

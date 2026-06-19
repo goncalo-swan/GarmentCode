@@ -61,12 +61,22 @@ def run_pipeline(config):
             map_production_to_design,
             generate_pattern,
         )
+    elif garment_type == 'skirt':
+        from run_custom_skirt import (
+            map_production_to_design,
+            generate_pattern,
+        )
     else:
         from run_custom_pants import (
             map_production_to_design,
             generate_pattern,
             verify_measurements,
         )
+
+    # SYMKNEE flag for pants knee placement (pants path only)
+    if garment_type not in ('shirt', 'skirt'):
+        from assets.garment_programs import pants as _pants_mod
+        _pants_mod.SYMKNEE = bool(config.get('symknee', False))
 
     body_yaml = config['body']['yaml']
     body_name = config['body']['name']
@@ -101,10 +111,21 @@ def run_pipeline(config):
 
         if garment_type == 'shirt':
             design = map_production_to_design(prod, body_yaml)
+        elif garment_type == 'skirt':
+            design = map_production_to_design(
+                prod, body_yaml,
+                skirt_style=config.get('skirt_style', 'PencilSkirt'),
+            )
         else:
             design = map_production_to_design(
                 prod, body_yaml,
                 elastic_waistband=config.get('elastic_waistband', False),
+                balloon_leg=config.get('balloon_leg', False),
+                cuff_inseam_fraction=config.get('cuff_inseam_fraction'),
+                cuff_ease=config.get('cuff_ease', 1.0),
+                elastic_waist_gather=config.get('elastic_waist_gather', False),
+                waist_match_body=config.get('waist_match_body', False),
+                front_slit=config.get('front_slit'),
             )
         # Apply design overrides from config (e.g. upper type, collar, placket)
         if 'design_overrides' in config:
@@ -114,11 +135,17 @@ def run_pipeline(config):
                 size, design, body_yaml, output_base,
                 garment_prefix=garment_prefix,
             )
+        elif garment_type == 'skirt':
+            folder, garment_name = generate_pattern(
+                size, design, body_yaml, output_base,
+                garment_prefix=garment_prefix,
+            )
         else:
             folder, garment_name = generate_pattern(
                 size, design, body_yaml, output_base,
                 garment_prefix=garment_prefix,
-                ankle_clearance_pct=config.get('ankle_clearance_pct', 0.03),
+                ankle_clearance_pct=config.get('ankle_clearance_pct', 0.0),
+                anchor_mode=config.get('anchor_mode', 'crotch_zero'),
             )
         # Post-process collar panels: rotate into fold positions.
         # Panels are serialized flat to avoid stitching vertex collapse;
@@ -157,17 +184,46 @@ def run_pipeline(config):
             )
             if sim_folder:
                 sim_results.append((sim_folder, size))
+                # Delete the intermediate pattern folder; keep only the sim folder
+                import shutil
+                try:
+                    shutil.rmtree(folder)
+                except OSError as rm_err:
+                    print(f'  (pattern folder cleanup skipped: {rm_err})')
         except Exception as e:
             print(f'  Simulation failed for size {size}: {e}')
             import traceback
             traceback.print_exc()
+
+    # Step 3.5: Re-pose garments to a target pose (shirts only)
+    repose_to = config.get('repose_to')
+    apply_sdf_push = bool(config.get('sdf_push', False))
+    if repose_to and garment_type == 'shirt':
+        from run_custom_tshirt import (
+            repose_garment, render_reposed, sdf_push_outward,
+        )
+        apose_obj = f'./assets/bodies/{body_name}.obj'
+        print(f'\n--- Step 3.5: Reposing garments {apose_obj} -> {repose_to} ---')
+        for sim_folder, size in sim_results:
+            try:
+                repose_garment(sim_folder, apose_obj=apose_obj, custom_obj=repose_to)
+                if apply_sdf_push:
+                    sdf_push_outward(sim_folder, target_body_obj=repose_to)
+                render_reposed(sim_folder, custom_obj=repose_to, sim_props=sim_props_dict)
+            except Exception as e:
+                print(f'  Repose failed for size {size}: {e}')
+                import traceback
+                traceback.print_exc()
 
     # Step 4: Combined meshes
     print("\n--- Step 4: Creating combined body+garment meshes ---")
     for sim_folder, size in sim_results:
         print(f'\nCombining size {size}...')
         try:
-            save_combined_mesh(sim_folder, body_name=body_name)
+            if repose_to and garment_type == 'shirt':
+                save_combined_mesh(sim_folder, body_obj_path=repose_to)
+            else:
+                save_combined_mesh(sim_folder, body_name=body_name)
         except Exception as e:
             print(f'  Combined mesh failed for size {size}: {e}')
             import traceback
@@ -193,6 +249,11 @@ if __name__ == '__main__':
     parser.add_argument('--body-yaml', help='Override body YAML path', default=None)
     parser.add_argument('--body-name', help='Override body name (matches .obj path under assets/bodies/)', default=None)
     parser.add_argument('--gpu', help='CUDA device ID', default='1')
+    parser.add_argument('--anchor-mode', help='Garment Y anchor: ankle_clearance | crotch_zero | midway', default=None)
+    parser.add_argument('--garment-prefix', help='Override garment output prefix (replaces config value)', default=None)
+    parser.add_argument('--repose-to', help='Target-pose body OBJ for post-sim re-pose (shirts only)', default=None)
+    parser.add_argument('--sdf-push', action='store_true', help='After repose, push cloth verts inside the target body outward')
+    parser.add_argument('--edge-contact-mult', type=int, help='Multiply warp edge-edge contact buffer (per-spring) for heavy-self-contact barrels', default=None)
     args = parser.parse_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -206,5 +267,18 @@ if __name__ == '__main__':
         config['body']['yaml'] = args.body_yaml
     if args.body_name:
         config['body']['name'] = args.body_name
+    if args.anchor_mode:
+        config['anchor_mode'] = args.anchor_mode
+    if args.garment_prefix:
+        config['garment_prefix'] = args.garment_prefix
+    elif args.anchor_mode:
+        gp = config.get('garment_prefix', 'garment')
+        config['garment_prefix'] = f'{gp}_{args.anchor_mode}'
+    if args.edge_contact_mult:
+        config['sim_props']['sim']['config']['edge_contact_mult'] = args.edge_contact_mult
+    if args.repose_to:
+        config['repose_to'] = args.repose_to
+    if args.sdf_push:
+        config['sdf_push'] = True
 
     run_pipeline(config)

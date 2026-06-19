@@ -7,7 +7,7 @@ sim:
     max_meshgen_time: 60
     max_sim_time: 600
     static_threshold: 0.03
-    non_static_percent: 1.5
+    non_static_percent: 1.0
 
     max_body_collisions: 35
     max_self_collisions: 300 
@@ -25,7 +25,7 @@ sim:
       spring_kd: 10.0
       fabric_density: 1.0
       fabric_thickness: 0.1
-      fabric_friction: 0.5
+      fabric_friction: 0.2
     options:
       enable_particle_particle_collisions: false
       enable_triangle_particle_collisions: true
@@ -63,7 +63,7 @@ sim:
       smoothing_num_steps: 100
       smoothing_frame_gap_between_steps: 1
       body_collision_thickness: 0.25
-      body_friction: 0.5
+      body_friction: 0.3
   stats:
     fails: {}
     sim_time: {}

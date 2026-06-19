@@ -1,5 +1,35 @@
 import pygarment as pyg
 
+
+def effective_waist_hips(body, section):
+    """Return (waist, hips, waist_back_width, hip_back_width) for a skirt
+    section, applying `target_waist` / `target_hips` if set on the section.
+
+    Matches the pants/shirt convention of multiplying body fields inline
+    with design knobs (cf. pants.py:width_v) — body is read, never mutated.
+    Back-width terms are scaled proportionally so the front/back ratio is
+    preserved.
+    """
+    target_waist = section.get('target_waist', {}).get('v') if section else None
+    target_hips = section.get('target_hips', {}).get('v') if section else None
+
+    if target_waist is not None:
+        eff_waist = float(target_waist)
+        eff_w_back = float(body['waist_back_width'] * (target_waist / body['waist']))
+    else:
+        eff_waist = body['waist']
+        eff_w_back = body['waist_back_width']
+
+    if target_hips is not None:
+        eff_hips = float(target_hips)
+        eff_h_back = float(body['hip_back_width'] * (target_hips / body['hips']))
+    else:
+        eff_hips = body['hips']
+        eff_h_back = body['hip_back_width']
+
+    return eff_waist, eff_hips, eff_w_back, eff_h_back
+
+
 class BaseBodicePanel(pyg.Panel):
     """Base class for bodice panels that defines expected interfaces and common functions"""
     def __init__(self, name, body, design) -> None:

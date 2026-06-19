@@ -7,7 +7,7 @@ sim:
     max_meshgen_time: 60
     max_sim_time: 600
     static_threshold: 0.03
-    non_static_percent: 1.5
+    non_static_percent: 1.0
 
     max_body_collisions: 35
     max_self_collisions: 300

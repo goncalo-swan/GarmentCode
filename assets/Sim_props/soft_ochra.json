@@ -51,7 +51,7 @@
         "weft_rubber_scale": 1.0
       },
       "max_sim_steps": 1500,
-      "non_static_percent": 1.5,
+      "non_static_percent": 1.0,
       "object_intersect_border_threshold": 100,
       "resolution_scale": 9.0,
       "self_intersect_hit_threshold": 0,

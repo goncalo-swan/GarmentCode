@@ -586,6 +586,15 @@ design:
           type: float
           default_prob: 0.3
   skirt:
+    # Optional production targets (cm). Consumed by apply_design_body_targets
+    # in base_classes.py: when set the skirt instantiates with a scaled body
+    # view, so production_data only flows through design knobs.
+    target_waist:
+      v: null
+      type: float
+    target_hips:
+      v: null
+      type: float
     length:
       v: 0.2
       range:
@@ -621,6 +630,15 @@ design:
       type: int
       default_prob: 0.5
   flare-skirt:
+    # Optional production targets (cm). Consumed by apply_design_body_targets
+    # in base_classes.py: when set the skirt instantiates with a scaled body
+    # view, so production_data only flows through design knobs.
+    target_waist:
+      v: null
+      type: float
+    target_hips:
+      v: null
+      type: float
     length:
       v: 0.2
       range:
@@ -730,6 +748,15 @@ design:
       - 10
       type: int
   pencil-skirt:
+    # Optional production targets (cm). Consumed by apply_design_body_targets
+    # in base_classes.py: when set the skirt instantiates with a scaled body
+    # view, so production_data only flows through design knobs.
+    target_waist:
+      v: null
+      type: float
+    target_hips:
+      v: null
+      type: float
     length:
       v: 0.4
       range:

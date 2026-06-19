@@ -122,9 +122,36 @@ class SimConfig:
             self.max_frame_time = int(self.max_frame_time)
         self.max_sim_time = int(self.get_sim_props_value(sim_props, 'max_sim_time', 25 * 60))
         self.non_static_percent = self.get_sim_props_value(sim_props, 'non_static_percent', 5)
+        # Optional floor on min_sim_steps; applied in update_min_steps().
+        self.min_sim_steps_override = self.get_sim_props_value(sim_props, 'min_sim_steps', None)
+        # Optional EXTRA static collider: path to an OBJ (in cm, body frame) added
+        # as a second static collision shape alongside the body — used for layered
+        # outfits, where an already-draped inner garment becomes a fixed obstacle
+        # the outer garment drapes over. None = disabled.
+        self.static_collision_obj = self.get_sim_props_value(sim_props, 'static_collision_obj', None)
+        # Friction for the extra static collider (top sliding over the inner
+        # garment). Defaults to body_friction; lower it so a tight outer garment
+        # slides over the inner one instead of catching and folding.
+        self.static_collision_friction = self.get_sim_props_value(sim_props, 'static_collision_friction', None)
+        # Optional body POSE ANIMATION during the sim: a .npy of shape
+        # (N, n_body_verts, 3) in METRES (frame 0 == the loaded body). The body
+        # is stepped through these poses (collision refit each step) so the cloth
+        # tracks the moving body — e.g. drape on A-pose, animate to a target pose
+        # so sleeves wrap with room and then follow the arms down. None = off.
+        self.pose_animation_npy = self.get_sim_props_value(sim_props, 'pose_animation_npy', None)
+        self.pose_animation_start_frame = self.get_sim_props_value(sim_props, 'pose_animation_start_frame', 250)
+        self.pose_animation_frame_gap = self.get_sim_props_value(sim_props, 'pose_animation_frame_gap', 3)
+        # End the sim this many frames after the last pose step (gravity is on
+        # during reposing, so the garment is already settled — extra settling
+        # just lets it creep down a tilted pose). Auto-caps max_sim_steps.
+        self.pose_animation_settle_frames = self.get_sim_props_value(sim_props, 'pose_animation_settle_frames', 30)
         # Quality filter
         self.max_body_collisions = self.get_sim_props_value(sim_props, 'max_body_collisions', 0)
         self.max_self_collisions = self.get_sim_props_value(sim_props, 'max_self_collisions', 0)
+        # Multiplier on the warp edge-edge contact buffer (per-spring, default 1).
+        # Raise for heavy-self-contact garments (deep barrels) that otherwise
+        # overflow the buffer at stitch init and crash (CUDA illegal-memory-access).
+        self.edge_contact_mult = self.get_sim_props_value(sim_props, 'edge_contact_mult', 1)
 
         
         # Self-collision prevention properties
@@ -199,6 +226,15 @@ class SimConfig:
             sim_props_option,'cloth_reference_margin', 0.1)
         self.cloth_reference_k = self.get_sim_props_value(
             sim_props_option,'cloth_reference_k', 1.0e7)
+
+        # Auto pre-shift options: when garment hem starts below the floor,
+        # compress lower-body cloth verts in the initial state so the cuff
+        # clears the floor for clean stitching. Rest lengths stay natural so
+        # fabric drapes back during sim, with excess length puddling at floor.
+        self.auto_pre_lift_enabled = self.get_sim_props_value(
+            sim_props_option, 'auto_pre_lift_enabled', True)
+        self.auto_pre_lift_clearance = self.get_sim_props_value(
+            sim_props_option, 'auto_pre_lift_clearance', 1.0)
 
         # Body smoothing options
         self.enable_body_smoothing = self.get_sim_props_value(
@@ -276,12 +312,19 @@ class SimConfig:
 
     def update_min_steps(self):
         self.min_sim_steps = 0
-        if self.enable_body_smoothing: 
+        if self.enable_body_smoothing:
             self.min_sim_steps = self.smoothing_recover_start_frame + self.smoothing_num_steps
         if self.enable_attachment_constraint:
-            # NOTE: Adding a small number of frames 
+            # NOTE: Adding a small number of frames
             # to allow clothing movement to restart after attachment is released
             self.min_sim_steps = max(self.min_sim_steps, self.attachment_frames + 5)
+        # Allow the yaml to force a higher floor — useful when the static
+        # threshold would otherwise fire immediately after zero_gravity_steps
+        # (e.g. no attachment + no smoothing → min_sim_steps=0 → gravity has
+        # no time to act before the static check passes).
+        yaml_min = getattr(self, 'min_sim_steps_override', None)
+        if yaml_min is not None:
+            self.min_sim_steps = max(self.min_sim_steps, int(yaml_min))
 
     def get_sim_props_value(self, sim_props, name, default_value):
         if name in sim_props:

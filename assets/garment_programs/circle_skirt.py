@@ -131,9 +131,17 @@ class SkirtCircle(StackableSkirtComponent):
         super().__init__(body, design, tag)
 
         design = design['flare-skirt']
+
+        # Production targets applied inline (no body mutation).
+        from .base_classes import effective_waist_hips
+        eff_waist, eff_hips, eff_w_back, _ = effective_waist_hips(body, design)
+
         suns = design['suns']['v']
         self.rise = design['rise']['v'] if rise is None else rise
-        waist, hips_depth, _ = self.eval_rise(self.rise)
+        _, hips_depth, _ = self.eval_rise(self.rise)
+        width_factor = min(self.rise, 1.0)
+        waist = pyg.utils.lin_interpolation(eff_hips, eff_waist, width_factor)
+        self.adj_waist = waist
 
         if length is None:  # take from design parameters
             length = hips_depth + design['length']['v'] * body['_leg_length']
@@ -145,34 +153,34 @@ class SkirtCircle(StackableSkirtComponent):
         # panels
         if not asymm:  # Typical symmetric skirt
             self.front = CircleArcPanel.from_w_length_suns(
-                f'skirt_front_{tag}' if tag else 'skirt_front', 
+                f'skirt_front_{tag}' if tag else 'skirt_front',
                 length, waist / 2, suns / 2,
-                match_top_int_proportion=self.body['waist'] - self.body['waist_back_width'],
+                match_top_int_proportion=eff_waist - eff_w_back,
                 ).translate_by([0, body['_waist_level'], 15])
 
             self.back = CircleArcPanel.from_w_length_suns(
-                f'skirt_back_{tag}'  if tag else 'skirt_back', 
+                f'skirt_back_{tag}'  if tag else 'skirt_back',
                 length, waist / 2, suns / 2,
-                match_top_int_proportion=self.body['waist_back_width'],
+                match_top_int_proportion=eff_w_back,
                 ).translate_by([0, body['_waist_level'], -15])
         else:
             # NOTE: Asymmetic front/back is only defined on full skirt (1 sun)
             w_rad = waist / 2 / np.pi
             f_length = design['asymm']['front_length']['v'] * length
-            tot_len = w_rad * 2 + length + f_length 
+            tot_len = w_rad * 2 + length + f_length
             del_r = tot_len / 2 - f_length - w_rad
             s_length = np.sqrt((tot_len / 2)**2 - del_r**2) - w_rad
 
             self.front = AsymHalfCirclePanel(
-                f'skirt_front_{tag}' if tag else 'skirt_front', 
+                f'skirt_front_{tag}' if tag else 'skirt_front',
                 w_rad, f_length, s_length,
-                match_top_int_proportion=self.body['waist'] - self.body['waist_back_width'],
+                match_top_int_proportion=eff_waist - eff_w_back,
                 ).translate_by([0, body['_waist_level'], 15])
 
             self.back = AsymHalfCirclePanel(
-                f'skirt_back_{tag}'  if tag else 'skirt_back', 
+                f'skirt_back_{tag}'  if tag else 'skirt_back',
                 w_rad, length, s_length,
-                match_top_int_proportion=self.body['waist_back_width'],
+                match_top_int_proportion=eff_w_back,
                 ).translate_by([0, body['_waist_level'], -15])
 
         # Add a cut

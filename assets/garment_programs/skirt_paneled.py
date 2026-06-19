@@ -97,14 +97,15 @@ class ThinSkirtPanel(pyg.Panel):
 class FittedSkirtPanel(pyg.Panel):
     """Fitted panel for a pencil skirt"""
     def __init__(
-            self, name, body, design, 
-            waist, hips, hips_depth,  # TODOLOW Half measurement instead of a quarter   
+            self, name, body, design,
+            waist, hips, hips_depth,  # TODOLOW Half measurement instead of a quarter
             length,
             hipline_ext=1,
             dart_position=None, dart_frac=0.5, double_dart=False,
             match_top_int_to=None,
             slit=0, left_slit=0, right_slit=0,
-            side_cut=None, flip_side_cut=False
+            side_cut=None, flip_side_cut=False,
+            effective_hips=None,
         ) -> None:
         """ Fitted panel for a pencil skirt
 
@@ -117,7 +118,10 @@ class FittedSkirtPanel(pyg.Panel):
         low_angle = design['low_angle']['v']
         hip_side_incl = np.deg2rad(body['_hip_inclination'])
         flare = design['flare']['v']
-        low_width = body['hips'] * (flare - 1) / 4 + hips  # Distribute the difference equally 
+        # Apply production hip scaling if provided (PencilSkirt passes
+        # effective_hips when target_hips is set); else use body.hips.
+        eff_hips_for_flare = effective_hips if effective_hips is not None else body['hips']
+        low_width = eff_hips_for_flare * (flare - 1) / 4 + hips  # Distribute the difference equally
                                                                            # between front and back
         # adjust for a rise
         adj_hips_depth = hips_depth * hipline_ext
@@ -311,12 +315,17 @@ class PencilSkirt(StackableSkirtComponent):
         design = design['pencil-skirt']
         self.design = design  # Make accessible from outside
 
+        # Production targets are applied inline (mirrors pants.py:width_v).
+        # Body is read, never mutated; effective_* values feed the panel math.
+        from .base_classes import effective_waist_hips
+        eff_waist, eff_hips, eff_w_back, eff_h_back = effective_waist_hips(body, design)
+
         # condition
         if design['style_side_cut']['v'] is not None:
-            depth = 0.7 * (body['hips'] / 4 - body['bust_points'] / 2)
+            depth = 0.7 * (eff_hips / 4 - body['bust_points'] / 2)
             shape_class = getattr(shapes, design['style_side_cut']['v'])
             style_shape_l, style_shape_r = shape_class(
-                width=depth * 1.5, 
+                width=depth * 1.5,
                 depth=depth, n_rays=6, d_rays=depth*0.2,
                 filename=design['style_side_file']['v'] if 'style_side_file' in design else None
             )
@@ -325,47 +334,56 @@ class PencilSkirt(StackableSkirtComponent):
 
         # Force from arguments if given
         self.rise = design['rise']['v'] if rise is None else rise
-        waist, hips_depth, back_waist = self.eval_rise(self.rise)
+        # eval_rise computes hips_depth (geometry only). For waist/back_waist
+        # we interpolate the effective values (rise<1 → interp toward hips).
+        _, hips_depth, _ = self.eval_rise(self.rise)
+        width_factor = min(self.rise, 1.0)
+        waist = pyg.utils.lin_interpolation(eff_hips, eff_waist, width_factor)
+        back_waist = pyg.utils.lin_interpolation(eff_h_back, eff_w_back, width_factor)
+        self.adj_waist = waist  # eval_rise side-effect kept consistent
+
         if length is None:
             length = design['length']['v'] * body['_leg_length']  # Depends on leg length
         else:
             length = length - hips_depth
 
         self.front = FittedSkirtPanel(
-            'skirt_front',   
+            'skirt_front',
             body,
             design,
             (waist - back_waist) / 2,
-            (body['hips'] - body['hip_back_width']) / 2,
+            (eff_hips - eff_h_back) / 2,
             hips_depth=hips_depth,
             length=length,
             dart_position=body['bust_points'] / 2,
             dart_frac=0.8,  # Diff for front and back
-            match_top_int_to=(body['waist'] - body['waist_back_width']),
-            slit=design['front_slit']['v'] if slit else 0, 
+            match_top_int_to=(eff_waist - eff_w_back),
+            slit=design['front_slit']['v'] if slit else 0,
             left_slit=design['left_slit']['v'] if slit else 0,
             right_slit=design['right_slit']['v'] if slit else 0,
-            side_cut=style_shape_l
+            side_cut=style_shape_l,
+            effective_hips=eff_hips,
         ).translate_to([0, body['_waist_level'], 25])
 
         self.back = FittedSkirtPanel(
-            'skirt_back', 
+            'skirt_back',
             body,
             design,
             back_waist / 2,
-            body['hip_back_width'] / 2,
+            eff_h_back / 2,
             length=length,
             hips_depth=hips_depth,
             hipline_ext=1.05,
             dart_position=body['bum_points'] / 2,
-            dart_frac=0.85,   
+            dart_frac=0.85,
             double_dart=True,
-            match_top_int_to=body['waist_back_width'],
-            slit=design['back_slit']['v'] if slit else 0, 
-            left_slit=design['left_slit']['v'] if slit else 0, 
+            match_top_int_to=eff_w_back,
+            slit=design['back_slit']['v'] if slit else 0,
+            left_slit=design['left_slit']['v'] if slit else 0,
             right_slit=design['right_slit']['v'] if slit else 0,
-            side_cut=style_shape_r, 
+            side_cut=style_shape_r,
             flip_side_cut=False,
+            effective_hips=eff_hips,
         ).translate_to([0, body['_waist_level'], -20])
 
         self.stitching_rules = pyg.Stitches(
@@ -398,8 +416,16 @@ class Skirt2(StackableSkirtComponent):
 
         design = design['skirt']
 
+        # Production targets applied inline (no body mutation, matches pants/shirt).
+        from .base_classes import effective_waist_hips
+        eff_waist, eff_hips, eff_w_back, eff_h_back = effective_waist_hips(body, design)
+
         self.rise = design['rise']['v'] if rise is None else rise
-        waist, hip_line, back_waist = self.eval_rise(self.rise)
+        _, hip_line, _ = self.eval_rise(self.rise)
+        width_factor = min(self.rise, 1.0)
+        waist = pyg.utils.lin_interpolation(eff_hips, eff_waist, width_factor)
+        back_waist = pyg.utils.lin_interpolation(eff_h_back, eff_w_back, width_factor)
+        self.adj_waist = waist
 
         # Force from arguments if given
         if length is None:
@@ -410,22 +436,22 @@ class Skirt2(StackableSkirtComponent):
         length = max(length, min_len)
 
         self.front = SkirtPanel(
-            f'skirt_front_{tag}' if tag else 'skirt_front', 
-            waist_length=waist - back_waist, 
+            f'skirt_front_{tag}' if tag else 'skirt_front',
+            waist_length=waist - back_waist,
             length=length,
             ruffles=design['ruffle']['v'] if top_ruffles else 1,   # Only if on waistband
             flare=design['flare']['v'],
             bottom_cut=design['bottom_cut']['v'] * design['length']['v'] if slit else 0,
-            match_top_int_to=(body['waist'] - body['waist_back_width'])
+            match_top_int_to=(eff_waist - eff_w_back),
         ).translate_to([0, body['_waist_level'], 25])
         self.back = SkirtPanel(
-            f'skirt_back_{tag}'  if tag else 'skirt_back', 
-            waist_length=back_waist, 
+            f'skirt_back_{tag}'  if tag else 'skirt_back',
+            waist_length=back_waist,
             length=length,
             ruffles=design['ruffle']['v'] if top_ruffles else 1,   # Only if on waistband
             flare=design['flare']['v'],
             bottom_cut=design['bottom_cut']['v'] * design['length']['v'] if slit else 0,
-            match_top_int_to=body['waist_back_width']
+            match_top_int_to=eff_w_back,
         ).translate_to([0, body['_waist_level'], -20])
 
         self.stitching_rules = pyg.Stitches(
@@ -456,12 +482,21 @@ class SkirtManyPanels(BaseBottoms):
 
     def __init__(self, body, design, tag='', rise=None, min_len=5) -> None:
         tag_extra = str(design['flare-skirt']['skirt-many-panels']['n_panels']['v'])
-        tag = f'{tag}_{tag_extra}' if tag else tag_extra 
+        tag = f'{tag}_{tag_extra}' if tag else tag_extra
         super().__init__(body, design, tag=tag, rise=rise)
 
         design = design['flare-skirt']
+
+        # Production targets applied inline (no body mutation).
+        from .base_classes import effective_waist_hips
+        eff_waist, eff_hips, eff_w_back, _ = effective_waist_hips(body, design)
+
         self.rise = design['rise']['v'] if rise is None else rise
-        waist, hip_line, _ = self.eval_rise(self.rise)
+        _, hip_line, _ = self.eval_rise(self.rise)
+        width_factor = min(self.rise, 1.0)
+        waist = pyg.utils.lin_interpolation(eff_hips, eff_waist, width_factor)
+        self.adj_waist = waist
+
         n_panels = design['skirt-many-panels']['n_panels']['v']
 
         # Length is dependent on length of legs

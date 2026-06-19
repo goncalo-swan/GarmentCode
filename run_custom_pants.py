@@ -798,15 +798,17 @@ def annotate_pattern_svg(svg_path, spec_path, measurements, offset_dist=4.0, fon
 def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
     """Numerically fit (rise_v, front_crotch_fraction) to match production F/B rise seam arcs.
 
-    Uses alternating 1D bisection:
-      1. Bisect front_crotch_fraction so F.Rise arc == target_f  (front ext controls front arc)
-      2. Bisect rise_v                  so B.Rise arc == target_b  (vertical rise controls both)
-      3. Repeat until both converge.
+    Joint 2D least-squares (trust-region-reflective) on the residual vector
+    (F_arc - target_f, B_arc - target_b). Replaces an earlier alternating-1D-
+    bisection scheme that oscillated when F and B targets coupled to the
+    other parameter (e.g. wide-leg flared jeans where the F-rise target is
+    only achievable at an interior rise_v ≠ either bisection endpoint).
 
     Returns: (rise_v, front_crotch_fraction)
     """
     from assets.garment_programs.meta_garment import MetaGarment
     from assets.bodies.body_params import BodyParameters
+    from scipy.optimize import least_squares
 
     target_f = prod['Front Rise']
     target_b = prod['Back Rise']
@@ -814,91 +816,83 @@ def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
     body_params = BodyParameters(body_yaml_path)
     mapper = ProductionToDesign(body_yaml_path)
 
+    # FRAC_MIN: below this the front crotch extension goes ~0, which causes
+    # Bézier curve fitting to degenerate.
+    RISE_MIN, RISE_MAX = 0.3, 1.8
+    FRAC_MIN, FRAC_MAX = 0.10, 0.99
+
+    # Best-seen fallback: even with LSQ, return the closest iterate visited
+    # (rather than the solver's final point) in case bounds clipping or a
+    # max-eval cap stops us at a worse spot than something we already saw.
+    best = {'score': float('inf')}
+
     def measure(rise_v, front_fraction):
         gm = dict(base_garment_measurements)
         gm['rise'] = rise_v
         design = mapper.map_pants(gm)
-        if front_fraction is not None:
-            design['pants']['front_crotch_fraction'] = {'v': float(front_fraction)}
-        garment = MetaGarment('_fit', body_params, design)
-        pattern = garment.assembly()
+        design['pants']['front_crotch_fraction'] = {'v': float(front_fraction)}
+        try:
+            garment = MetaGarment('_fit', body_params, design)
+            pattern = garment.assembly()
+        except (AssertionError, ValueError, ZeroDivisionError):
+            # Degenerate panel construction (e.g. zero-length sub-edge in the
+            # connector matching when body+garment proportions are extreme).
+            # Return a large penalty so the LSQ optimizer steers away from this
+            # parameter region while still converging on a feasible point.
+            return target_f + 100.0, target_b + 100.0
         panels = pattern.pattern['panels']
         stitches = pattern.pattern['stitches']
         f = _rise_seam_arc_length(panels, stitches, 'pant_f_l', 'pant_f_r')
         b = _rise_seam_arc_length(panels, stitches, 'pant_b_l', 'pant_b_r')
+        score = max(abs(f - target_f), abs(b - target_b))
+        if score < best['score']:
+            best.update(score=score, rise_v=rise_v, frac=front_fraction, f=f, b=b)
         return f, b
 
-    # Initial rise_v from average formula (used as starting point)
+    # Initial guess: rise_v from the average-rise formula, frac centered.
     body = mapper.body
     avg_rise = (target_f + target_b) / 2
-    rise_v = float(np.clip((avg_rise - body['crotch_hip_diff']) / body['hips_line'], 0.3, 1.8))
-    front_fraction = None  # use pants.py default on first pass
+    rise0 = float(np.clip((avg_rise - body['crotch_hip_diff']) / body['hips_line'],
+                          RISE_MIN, RISE_MAX))
+    frac0 = 0.55
 
-    print(f'  Fitting rise: target F={target_f:.1f}cm, B={target_b:.1f}cm')
+    print(f'  Fitting rise: target F={target_f:.1f}cm, B={target_b:.1f}cm  '
+          f'(start rise_v={rise0:.4f}, frac={frac0:.4f})')
 
-    # Minimum viable front_crotch_fraction: small values make the front crotch
-    # extension nearly zero, which causes degenerate Bézier curve fitting.
-    # 0.10 gives ~1–2cm front extension, which is the practical lower bound.
-    FRAC_MIN = 0.10
+    def residual(x):
+        rv = float(np.clip(x[0], RISE_MIN, RISE_MAX))
+        fr = float(np.clip(x[1], FRAC_MIN, FRAC_MAX))
+        f, b = measure(rv, fr)
+        return np.array([f - target_f, b - target_b])
 
-    prev_fraction = None
-    for outer in range(8):
-        # --- Step 1: bisect front_crotch_fraction to match F.Rise arc ---
-        # Higher fraction → larger front_extention → longer F.Rise arc
-        lo, hi = FRAC_MIN, 0.99
-        f_lo, _ = measure(rise_v, lo)
-        f_hi, _ = measure(rise_v, hi)
-        if f_lo > target_f:
-            front_fraction = lo  # clamp to minimum
-        elif f_hi < target_f:
-            front_fraction = hi  # clamp to maximum
-        else:
-            for _ in range(18):
-                mid = (lo + hi) / 2
-                f, _ = measure(rise_v, mid)
-                if f > target_f:
-                    hi = mid
-                else:
-                    lo = mid
-            front_fraction = (lo + hi) / 2
+    # diff_step=0.05 gives a ~5%-of-range FD step. The default ~1.5e-8 is far
+    # too small for measure() — pattern build introduces tiny numerical jitter
+    # that drowns the gradient signal at that scale, producing useless Jacobians.
+    res = least_squares(
+        residual, np.array([rise0, frac0]),
+        method='trf',
+        bounds=([RISE_MIN, FRAC_MIN], [RISE_MAX, FRAC_MAX]),
+        diff_step=0.05,
+        max_nfev=60,
+        xtol=1e-6, ftol=1e-6,
+    )
 
-        # --- Step 2: bisect rise_v to match B.Rise arc ---
-        # Higher rise_v → taller panel → longer B.Rise arc
-        lo, hi = 0.3, 1.8
-        _, b_lo = measure(lo, front_fraction)
-        _, b_hi = measure(hi, front_fraction)
-        if b_lo > target_b:
-            rise_v = lo
-        elif b_hi < target_b:
-            rise_v = hi
-        else:
-            for _ in range(18):
-                mid = (lo + hi) / 2
-                _, b = measure(mid, front_fraction)
-                if b > target_b:
-                    hi = mid
-                else:
-                    lo = mid
-            rise_v = (lo + hi) / 2
-
-        f_now, b_now = measure(rise_v, front_fraction)
-        print(f'  iter {outer + 1}: rise_v={rise_v:.4f}, frac={front_fraction:.4f} '
-              f'→ F={f_now:.2f}cm (Δ{f_now - target_f:+.2f}), '
-              f'B={b_now:.2f}cm (Δ{b_now - target_b:+.2f})')
-        if abs(f_now - target_f) < 0.05 and abs(b_now - target_b) < 0.05:
-            print(f'  Converged in {outer + 1} iterations.')
-            break
-        # If fraction hit the lower bound and didn't change, further iterations won't help
-        if front_fraction == FRAC_MIN and prev_fraction == FRAC_MIN:
-            print(f'  NOTE: F.Rise target {target_f:.1f}cm not achievable by this model '
-                  f'(best: {f_now:.1f}cm); constrained by crotch shape.')
-            break
-        prev_fraction = front_fraction
-
+    rise_v = best['rise_v']
+    front_fraction = best['frac']
+    print(f'  Joint LSQ ({res.nfev} evals, status={res.status}): '
+          f'rise_v={rise_v:.4f}, frac={front_fraction:.4f} '
+          f'→ F={best["f"]:.2f}cm (Δ{best["f"] - target_f:+.2f}), '
+          f'B={best["b"]:.2f}cm (Δ{best["b"] - target_b:+.2f})')
+    if best['score'] >= 0.05:
+        print(f'  NOTE: max-error {best["score"]:.2f}cm above 0.05cm threshold — '
+              f'targets may not be jointly achievable in this search space.')
     return rise_v, front_fraction
 
 
-def map_production_to_design(prod, body_yaml_path, elastic_waistband=False):
+def map_production_to_design(prod, body_yaml_path, elastic_waistband=False,
+                             balloon_leg=False, cuff_inseam_fraction=None,
+                             cuff_ease=1.0, elastic_waist_gather=False,
+                             waist_match_body=False, front_slit=None):
     """Map production measurements to GarmentCode design parameters.
 
     Args:
@@ -907,6 +901,15 @@ def map_production_to_design(prod, body_yaml_path, elastic_waistband=False):
         elastic_waistband: if True, clamp the waistband to be no larger than
             the body's waist. This ensures the gathered waistband always
             creates compression (elastic grip) against the body.
+        balloon_leg: if True, keep the leg wide all the way down (leg opening
+            ~ knee width, minimal taper) and add a gathered CuffBand that
+            blouses the wide leg bottom into a narrow cuff pinned to the
+            Ankle measurement. Models balloon/parachute trousers.
+        cuff_inseam_fraction: if set (e.g. 0.15), add a turn-up hem cuff whose
+            height is that fraction of the Inseam. The cuff is SUBTRACTED from
+            the leg (the Inseam already includes the cuff fabric — a turn-up
+            folds it back up), not added. Cuff circumference matches the leg
+            opening (no gather). Mutually exclusive with balloon_leg.
     """
     mapper = ProductionToDesign(body_yaml_path)
     body = mapper.body
@@ -925,12 +928,24 @@ def map_production_to_design(prod, body_yaml_path, elastic_waistband=False):
     waist_circ = prod['Waist']
     if elastic_waistband and waist_circ < body['waist']:
         waist_circ = body['waist'] * ELASTIC_EASE
+    # Fitted-to-body waist: override the config Waist with this body's waist
+    # (adapts per height), e.g. a baggy-leg pant on a normal fitted waistband.
+    if waist_match_body:
+        waist_circ = body['waist']
+
+    # Balloon leg: the leg stays wide to the bottom (≈ knee), and the Ankle
+    # measurement is the gathered cuff circumference, NOT the leg opening.
+    # So drive the leg opening from the knee width and gather to the ankle.
+    if balloon_leg:
+        leg_opening = prod.get('Knee') or prod['Ankle']
+    else:
+        leg_opening = prod['Ankle']
 
     garment_measurements = {
         'waist_circumference': waist_circ,
         'hip_circumference': prod['Low_Hip'],
         'length': panel_length,
-        'leg_opening': prod['Ankle'],
+        'leg_opening': leg_opening,
         'rise': 1.0,  # placeholder; overridden below
         'thigh_circumference': prod.get('Thigh'),
         'knee_circumference': prod.get('Knee'),
@@ -950,13 +965,370 @@ def map_production_to_design(prod, body_yaml_path, elastic_waistband=False):
         garment_measurements['rise'] = float(np.clip(rise_v, 0.5, 1.5))
         design = mapper.map_pants(garment_measurements)
 
+    # Balloon leg: attach a gathered cuff pinned to the Ankle circumference.
+    # The wide leg bottom (driven by Knee above) blouses into this narrow band.
+    if balloon_leg:
+        cuff = design['pants']['cuff']
+        cuff['type'] = {'v': 'CuffBand'}
+        # Cuff band depth (× leg length): how far the gathered cuff extends
+        # off the leg bottom. Kept minimal so the cuff reads as a tight
+        # gather, not a tall band. ~0.02 × ~80cm leg ≈ 1.6 cm.
+        cuff['cuff_len'] = {'v': 0.02}
+        cuff['top_ruffle'] = {'v': 1.0}           # unused when target_width set
+        cuff['target_width'] = {'v': float(prod['Ankle'])}
+
+    # Turn-up hem cuff: cuff HEIGHT = fraction × Inseam, subtracted from the
+    # leg (Inseam already includes the cuff fabric). Cuff circumference =
+    # leg opening (top_ruffle 1.0, no gather). cuff_len is a fraction of
+    # _leg_length, so convert: (frac × Inseam) / _leg_length.
+    elif cuff_inseam_fraction:
+        leg_length = body['_leg_length']
+        cuff_len_v = float(cuff_inseam_fraction) * prod['Inseam'] / leg_length
+        # cuff circumference = leg opening × cuff_ease (b_width = leg/top_ruffle,
+        # so top_ruffle = 1/ease). ease > 1 makes the cuff slightly larger than
+        # the leg opening, giving the turn-up a flared lip / visible depth.
+        ease = float(cuff_ease) if cuff_ease else 1.0
+        cuff = design['pants']['cuff']
+        cuff['type'] = {'v': 'CuffBand'}
+        cuff['cuff_len'] = {'v': cuff_len_v}
+        cuff['top_ruffle'] = {'v': 1.0 / ease}
+
+    # Elastic gathered waist: waistband fabric (= config Waist) bunches into an
+    # elastic top edge cinched to body waist. Flag read by StraightWB.
+    if elastic_waist_gather:
+        design['waistband']['elastic_gather'] = {'v': True}
+
+    # Front ankle split: cut an unstitched V-notch (this many cm tall) into the
+    # front panel ankle edge at center-front. Read by PantPanel via PantsHalf.
+    if front_slit:
+        design['pants']['front_slit'] = {'v': float(front_slit)}
+
     return design
+
+
+def _body_leg_x_centers(body_obj_path, y_lo, y_hi, lateral_min=0.5):
+    """Return (left_x, right_x) in cm for the body in the world Y band [y_lo, y_hi].
+
+    Body OBJ is in metres; values are converted to cm. Vertices are split by X
+    sign (left X > +lateral_min, right X < -lateral_min) and means returned.
+    """
+    xs, ys = [], []
+    with open(body_obj_path) as f:
+        for line in f:
+            if line.startswith('v '):
+                p = line.split()
+                xs.append(float(p[1])); ys.append(float(p[2]))
+    if not xs:
+        return None, None
+    xs_cm = [x * 100.0 for x in xs]
+    ys_cm = [y * 100.0 for y in ys]
+    left_xs  = [x for x, y in zip(xs_cm, ys_cm) if y_lo <= y <= y_hi and x >  lateral_min]
+    right_xs = [x for x, y in zip(xs_cm, ys_cm) if y_lo <= y <= y_hi and x < -lateral_min]
+    if not left_xs or not right_xs:
+        return None, None
+    return sum(left_xs) / len(left_xs), sum(right_xs) / len(right_xs)
+
+
+def _panel_world_vertices(panel):
+    """Return panel 2D vertices transformed into 3D world coords.
+
+    Spec stores panel vertices in panel-local 2D coords plus a rotation_zyx
+    (Euler angles in degrees) and translation. World vertex = R(zyx) * (vx, vy, 0)
+    + translation.
+    """
+    import numpy as np
+    verts2d = np.array(panel.get('vertices') or [], dtype=float)
+    if len(verts2d) == 0:
+        return None
+    verts3d_local = np.column_stack([verts2d, np.zeros(len(verts2d))])
+    rz, ry, rx = (np.deg2rad(a) for a in panel.get('rotation', [0, 0, 0]))
+    cz, sz = np.cos(rz), np.sin(rz)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cx, sx = np.cos(rx), np.sin(rx)
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    return (verts3d_local @ (Rz @ Ry @ Rx).T) + np.array(panel['translation'], dtype=float)
+
+
+def _garment_leg_y_band(spec):
+    """Compute a dynamic Y band [hem_Y, knee_Y] in world coords from the pant
+    panel vertices. Hem = lowest distinct Y level on the panels; Knee = the
+    next-lowest level (the knee corner of the design). Returns (None, None) if
+    the panels can't be parsed.
+    """
+    panels = spec.get('pattern', {}).get('panels', {})
+    needed = ['pant_f_l', 'pant_b_l', 'pant_f_r', 'pant_b_r']
+    if not all(n in panels for n in needed):
+        return None, None
+    hem_world_Ys, knee_world_Ys = [], []
+    for name in needed:
+        v = _panel_world_vertices(panels[name])
+        if v is None: continue
+        ys_sorted = sorted(set(round(float(y), 2) for y in v[:, 1]))
+        if len(ys_sorted) < 2: continue
+        hem_world_Ys.append(ys_sorted[0])
+        knee_world_Ys.append(ys_sorted[1])
+    if not hem_world_Ys or not knee_world_Ys:
+        return None, None
+    return min(hem_world_Ys), max(knee_world_Ys)
+
+
+def _garment_leg_x_centers(spec, y_lo, y_hi):
+    """Mean X of the pant_f_l + pant_b_l 3D vertices (and same for _r) in the
+    given world Y band. Returns (left_x, right_x) in cm."""
+    import numpy as np
+    panels = spec.get('pattern', {}).get('panels', {})
+    needed = ['pant_f_l', 'pant_b_l', 'pant_f_r', 'pant_b_r']
+    if not all(n in panels for n in needed):
+        return None, None
+    Lxs, Rxs = [], []
+    for name in needed:
+        v = _panel_world_vertices(panels[name])
+        if v is None: continue
+        v = v[(v[:, 1] >= y_lo) & (v[:, 1] <= y_hi)]
+        if len(v) == 0: continue
+        (Lxs if name.endswith('_l') else Rxs).extend(v[:, 0].tolist())
+    if not Lxs or not Rxs:
+        return None, None
+    return float(np.mean(Lxs)), float(np.mean(Rxs))
+
+
+def _apply_pose_x_correction(folder, body_obj_path,
+                             asymmetry_threshold=5.0, max_shift=3.0):
+    """Align both pant legs toward their body legs when the body has asymmetric
+    leg placement. Each leg's shift is clamped to ±max_shift cm. Symmetric
+    bodies (|body_L|-|body_R| under threshold) are a no-op.
+    """
+    spec_path = next(Path(folder).glob('*_specification.json'))
+    with open(spec_path) as f:
+        spec = json.load(f)
+
+    # Derive the calf/ankle Y band dynamically from the garment's hem and knee
+    # corners. This adapts to whatever ankle_clearance_pct is in effect.
+    band = _garment_leg_y_band(spec)
+    if band is None or band[0] is None:
+        print('  Pose-X correction skipped (could not derive Y band from panels)')
+        return
+    y_lo, y_hi = band
+
+    body_l, body_r = _body_leg_x_centers(body_obj_path, y_lo, y_hi)
+    if body_l is None or body_r is None:
+        print(f'  Pose-X correction skipped (no body leg verts in Y band [{y_lo:.1f},{y_hi:.1f}])')
+        return
+
+    asym = abs(body_l) - abs(body_r)
+    print(f'  Pose-X: Y band=[{y_lo:.2f}, {y_hi:.2f}]  body legs L={body_l:+.2f} R={body_r:+.2f}  '
+          f'asymmetry(|L|-|R|)={asym:+.2f}cm')
+
+    if abs(asym) < asymmetry_threshold:
+        print(f'    |asymmetry| < {asymmetry_threshold}cm threshold; no shift.')
+        return
+
+    garm_l, garm_r = _garment_leg_x_centers(spec, y_lo, y_hi)
+    if garm_l is None or garm_r is None:
+        print('    skipped (could not compute garment leg X)')
+        return
+
+    raw_l = body_l - garm_l
+    raw_r = body_r - garm_r
+    shift_l = max(-max_shift, min(max_shift, raw_l))
+    shift_r = max(-max_shift, min(max_shift, raw_r))
+    print(f'    garment legs L={garm_l:+.2f} R={garm_r:+.2f}  '
+          f'raw shifts L={raw_l:+.2f} R={raw_r:+.2f}  capped L={shift_l:+.2f} R={shift_r:+.2f}')
+
+    panels = spec['pattern']['panels']
+    # Include each leg's cuff panels so the cuff shifts with its leg.
+    for name in ['pant_f_l', 'pant_b_l'] + [n for n in panels if 'l_cuff' in n]:
+        if name in panels: panels[name]['translation'][0] += shift_l
+    for name in ['pant_f_r', 'pant_b_r'] + [n for n in panels if 'r_cuff' in n]:
+        if name in panels: panels[name]['translation'][0] += shift_r
+
+    with open(spec_path, 'w') as f:
+        json.dump(spec, f, indent=2)
+
+
+def _apply_pose_x_rotation(folder, body_obj_path,
+                           top_band_height=15.0,
+                           top_band_offset_below_crotch=15.0,
+                           bot_band_height=20.0,
+                           min_angle_deg=0.5):
+    """Per-leg translation + Z rotation to align pant legs with diagonally
+    asymmetric body legs (HM-style A-pose bodies). Each leg's two panels (front
+    + back) translate and rotate as a rigid pair around their shared top-center
+    pivot, so the waistband seam stays glued to the leg top while only the leg
+    below tilts.
+
+      pivot = mean of the leg's top-edge X corners (front + back), Y = leg top
+      X shift = body_X_top  - pivot_X
+      angle  = atan2(body_X_bot - body_X_top, leg_length)
+
+    The waistband itself is not rotated; it absorbs the resulting top-edge tilt
+    via stitching during sim.
+    """
+    import math
+    spec_path = next(Path(folder).glob('*_specification.json'))
+    with open(spec_path) as f:
+        spec = json.load(f)
+
+    panels = spec['pattern']['panels']
+    needed = ['pant_f_l', 'pant_b_l', 'pant_f_r', 'pant_b_r']
+    if not all(n in panels for n in needed):
+        print('  Pose-X-Rot skipped (missing pant panels)')
+        return
+
+    # 3D Y extents per panel (assumes rotation is currently [0,0,0])
+    panel_y_max = {n: panels[n]['translation'][1] + max(v[1] for v in panels[n]['vertices'])
+                   for n in needed}
+    panel_y_min = {n: panels[n]['translation'][1] + min(v[1] for v in panels[n]['vertices'])
+                   for n in needed}
+    leg_top_y = max(panel_y_max.values())
+    leg_bot_y = min(panel_y_min.values())
+    leg_length = leg_top_y - leg_bot_y
+
+    top_band = (leg_top_y - top_band_offset_below_crotch - top_band_height,
+                leg_top_y - top_band_offset_below_crotch)
+    bot_band = (max(0.0, leg_bot_y), leg_bot_y + bot_band_height)
+
+    body_top_L, body_top_R = _body_leg_x_centers(body_obj_path, *top_band)
+    body_bot_L, body_bot_R = _body_leg_x_centers(body_obj_path, *bot_band)
+    if any(v is None for v in (body_top_L, body_top_R, body_bot_L, body_bot_R)):
+        print(f'  Pose-X-Rot skipped (no body leg samples; top band={top_band}, bot band={bot_band})')
+        return
+
+    print(f'  Pose-X-Rot: leg_top_y={leg_top_y:.2f} leg_bot_y={leg_bot_y:.2f} leg_len={leg_length:.2f}')
+    print(f'    body top band Y=[{top_band[0]:.2f}, {top_band[1]:.2f}]  L={body_top_L:+.2f} R={body_top_R:+.2f}')
+    print(f'    body bot band Y=[{bot_band[0]:.2f}, {bot_band[1]:.2f}]  L={body_bot_L:+.2f} R={body_bot_R:+.2f}')
+
+    def pivot_x_for_leg(panel_names):
+        xs = []
+        for n in panel_names:
+            p = panels[n]
+            ymax = max(v[1] for v in p['vertices'])
+            xs.extend(p['translation'][0] + v[0]
+                      for v in p['vertices'] if v[1] == ymax)
+        return sum(xs) / len(xs) if xs else None
+
+    pivot_L_x = pivot_x_for_leg(['pant_f_l', 'pant_b_l'])
+    pivot_R_x = pivot_x_for_leg(['pant_f_r', 'pant_b_r'])
+    pivot_y = leg_top_y
+
+    shift_L = body_top_L - pivot_L_x
+    shift_R = body_top_R - pivot_R_x
+    theta_L = math.atan2(body_bot_L - body_top_L, leg_length)
+    theta_R = math.atan2(body_bot_R - body_top_R, leg_length)
+
+    print(f'    garment pivots L={pivot_L_x:+.2f} R={pivot_R_x:+.2f}  pivot_y={pivot_y:.2f}')
+    print(f'    shifts L={shift_L:+.2f} R={shift_R:+.2f}')
+    print(f'    angles L={math.degrees(theta_L):+.2f}° R={math.degrees(theta_R):+.2f}°')
+
+    if abs(math.degrees(theta_L)) < min_angle_deg and abs(math.degrees(theta_R)) < min_angle_deg \
+            and abs(shift_L) < 0.5 and abs(shift_R) < 0.5:
+        print('    below min thresholds; no transform applied')
+        return
+
+    def apply_rigid(panel, shift_x, theta, pivot_x_world):
+        # Pivot in world after the X shift
+        rot_pivot_x = pivot_x_world + shift_x
+        tx, ty, tz = panel['translation']
+        tx += shift_x
+        dx, dy = tx - rot_pivot_x, ty - pivot_y
+        c, s = math.cos(theta), math.sin(theta)
+        panel['translation'] = [rot_pivot_x + dx * c - dy * s,
+                                pivot_y + dx * s + dy * c,
+                                tz]
+        rx, ry, rz = panel['rotation']
+        panel['rotation'] = [rx, ry, rz + math.degrees(theta)]
+
+    # Move each leg AND its cuff panels together so the cuff stays coaxial
+    # with the leg after the per-leg shift/rotation. (Cuff panels are named
+    # pant_l_cuff_* / pant_r_cuff_*; absent when there is no cuff.)
+    left_grp = ['pant_f_l', 'pant_b_l'] + [n for n in panels if 'l_cuff' in n]
+    right_grp = ['pant_f_r', 'pant_b_r'] + [n for n in panels if 'r_cuff' in n]
+    for n in left_grp:
+        apply_rigid(panels[n], shift_L, theta_L, pivot_L_x)
+    for n in right_grp:
+        apply_rigid(panels[n], shift_R, theta_R, pivot_R_x)
+
+    with open(spec_path, 'w') as f:
+        json.dump(spec, f, indent=2)
+
+
+CROTCH_TARGET_OFFSET = 0.0  # garment crotch placed AT body crotch
+# NOTE: the garment crotch is placed at exactly body_crotch_Y + CROTCH_TARGET_OFFSET.
+# body_crotch_Y now comes from the SMPL crotch landmark vertex (see _body_crotch_Y)
+# when the body mesh is SMPL, so offset 0 lands the garment on the real crotch.
+# before simulation (was previously ~10cm too high due to a bad as-built
+# assumption). So -1 here genuinely means 1cm below the body crotch.
+
+
+def _garment_crotch_Y(garment):
+    """Return the as-built 3D Y of the garment crotch (min Y of the pants
+    crotch interfaces), or None if no pants component is present.
+
+    Used to place the crotch at an absolute body-relative target before sim,
+    instead of assuming a fixed offset from the panels' build position.
+    """
+    ys = []
+    for sub in getattr(garment, 'subs', []):
+        right = getattr(sub, 'right', None)
+        if right is None or 'crotch_f' not in getattr(right, 'interfaces', {}):
+            continue
+        for half in (sub.right, sub.left):
+            for key in ('crotch_f', 'crotch_b'):
+                if key in half.interfaces:
+                    bb = half.interfaces[key].bbox_3d()
+                    ys.append(bb[0][1])   # min-Y corner = lowest crotch point
+    return min(ys) if ys else None
+
+
+SMPL_CROTCH_VERTEX = 1210  # SMPL crotch landmark (pose-invariant, fixed topology)
+
+def _body_crotch_Y(body, body_yaml_path):
+    """Body crotch height (cm above floor).
+
+    If the body mesh is SMPL (6890 verts) use the crotch landmark vertex 1210 --
+    pose-invariant and accurate. Otherwise fall back to the measurement formula,
+    which underestimates the true SMPL crotch by a height-dependent ~3-4.5cm.
+    """
+    formula = (body['height'] - body['head_l'] - body['waist_line']
+               - body['hips_line']) - body['crotch_hip_diff']
+    obj = Path(str(body_yaml_path).replace('.yaml', '.obj'))
+    if obj.exists():
+        try:
+            V = np.array([[float(x) for x in ln.split()[1:4]]
+                          for ln in open(obj, errors='replace') if ln.startswith('v ')])
+            if len(V) == 6890:  # SMPL topology
+                span = V[:, 1].max() - V[:, 1].min()
+                scale = 100.0 if span < 10 else 1.0  # body OBJ is in meters
+                return float((V[SMPL_CROTCH_VERTEX, 1] - V[:, 1].min()) * scale)
+        except Exception:
+            pass
+    return formula
 
 
 def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
                      garment_prefix='hm_pants',
-                     ankle_clearance_pct=0.03):
-    """Generate pattern using built-in MetaGarment system."""
+                     ankle_clearance_pct=0.0,
+                     anchor_mode='crotch_zero'):
+    """Generate pattern using built-in MetaGarment system.
+
+    anchor_mode:
+        'crotch'          — DEFAULT. Garment crotch starts at
+                            body_crotch_Y + CROTCH_TARGET_OFFSET (currently -2cm),
+                            with a floor safety: if that placement would put any
+                            panel below height*ankle_clearance_pct, lift more.
+                            lift = max(band_width + 5 + CROTCH_TARGET_OFFSET,
+                                       ankle_clearance - bbox_min[1])
+        'ankle_clearance' — Legacy: only enforce floor constraint. Crotch ends up
+                            at body_crotch_Y - band_width - 5 for short pants.
+        'crotch_zero'     — Always lift by (band_width + 5 + CROTCH_TARGET_OFFSET);
+                            no floor safety.
+        'midway'          — Average of ankle_clearance and crotch_zero lifts.
+
+    The lift is applied via garment.translate_by, which shifts the WHOLE
+    MetaGarment (pants panels + waistband) uniformly in Y.
+    """
     from assets.garment_programs.meta_garment import MetaGarment
     from assets.bodies.body_params import BodyParameters
 
@@ -965,12 +1337,42 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
     body = BodyParameters(body_yaml_path)
     garment = MetaGarment(garment_name, body, design)
 
-    # Ensure the garment starts above the ankle so that panels stitch
-    # together outside the body during the zero-gravity phase.
-    ankle_clearance = body['height'] * ankle_clearance_pct
     bbox_min, _ = garment.bbox3D()
-    if bbox_min[1] < ankle_clearance:
-        garment.translate_by([0, ankle_clearance - bbox_min[1], 0])
+    ankle_clearance = body['height'] * ankle_clearance_pct
+    lift_ankle = max(0.0, ankle_clearance - bbox_min[1])
+
+    band_width = (design.get('waistband', {}).get('width', {}).get('v', 0.0)
+                  * body['hips_line'])
+
+    # Lift to put the garment crotch at body_crotch_Y + CROTCH_TARGET_OFFSET.
+    # Measure the actual as-built crotch Y from the garment (min Y of the
+    # crotch interfaces) rather than assuming it sits at body_crotch - band -5
+    # (that assumption was ~10cm off, so the offset never hit its target).
+    body_crotch_Y = _body_crotch_Y(body, body_yaml_path)
+    as_built_crotch_Y = _garment_crotch_Y(garment)
+    if as_built_crotch_Y is not None:
+        lift_crotch = (body_crotch_Y + CROTCH_TARGET_OFFSET) - as_built_crotch_Y
+    else:
+        # Fallback to the legacy (approximate) formula if the crotch interface
+        # can't be located (e.g. non-pants lower garments).
+        lift_crotch = band_width + 5.0 + CROTCH_TARGET_OFFSET
+
+    if anchor_mode == 'crotch':
+        lift = max(lift_crotch, lift_ankle)
+    elif anchor_mode == 'ankle_clearance':
+        lift = lift_ankle
+    elif anchor_mode == 'crotch_zero':
+        lift = lift_crotch
+    elif anchor_mode == 'midway':
+        lift = 0.5 * (lift_ankle + lift_crotch)
+    else:
+        raise ValueError(f'Unknown anchor_mode={anchor_mode!r}')
+
+    print(f'  anchor_mode={anchor_mode}  band_width={band_width:.2f}  '
+          f'lift_ankle={lift_ankle:.2f}  lift_crotch={lift_crotch:.2f}  '
+          f'applied_lift={lift:.2f}')
+    if lift != 0.0:
+        garment.translate_by([0, lift, 0])
 
     pattern = garment.assembly()
 
@@ -986,6 +1388,20 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
         view_ids=False,
         with_printable=True
     )
+
+    # Adjust panel X-translations so each pant leg lands on its corresponding
+    # body leg, handling asymmetric body poses. Auto-detects the asymmetry; for
+    # symmetric bodies the threshold check inside makes this a no-op.
+    body_obj = Path(str(body_yaml_path).replace('.yaml', '.obj'))
+    if body_obj.exists():
+        mode = os.environ.get('POSE_MODE', 'rotate')
+        if mode == 'rotate':
+            _apply_pose_x_rotation(folder, body_obj)
+        else:
+            max_shift_override = float(os.environ.get('MAX_SHIFT', '3.0'))
+            _apply_pose_x_correction(folder, body_obj, max_shift=max_shift_override)
+    else:
+        print(f'  Pose-X correction skipped (no body OBJ at {body_obj})')
 
     print(f'  Pattern generated: {garment_name} -> {folder}')
     return Path(folder), garment_name
@@ -1047,6 +1463,10 @@ def simulate_pattern(pattern_folder, garment_name, output_base,
     props.serialize(paths.element_sim_props)
 
     print(f'  Running simulation for {in_name}...')
+    # Allow configs to opt out of per-frame video rendering (EGL/permission
+    # constrained hosts). Default True keeps prior behaviour for all configs
+    # that don't set the flag.
+    save_sim_video = props['sim']['config'].get('save_sim_video', True)
     run_sim(
         garment_box_mesh.name,
         props,
@@ -1055,7 +1475,7 @@ def simulate_pattern(pattern_folder, garment_name, output_base,
         store_usd=False,
         optimize_storage=False,
         verbose=False,
-        save_sim_video=True,
+        save_sim_video=save_sim_video,
         video_frame_interval=10,
         video_fps=30,
     )
@@ -1161,10 +1581,12 @@ def verify_measurements(spec_path, size, prod, body_yaml=None, elastic_waistband
     stitched = set()
     stitch_map = {}  # (panel, edge) -> (other_panel, other_edge)
     for stitch in stitches:
-        for side in stitch:
+        # a stitch is [sideA, sideB] and may carry a trailing 'right_wrong' str
+        sides = [s for s in stitch if isinstance(s, dict)]
+        for side in sides:
             stitched.add((side['panel'], side['edge']))
-        if len(stitch) == 2:
-            a, b = stitch
+        if len(sides) == 2:
+            a, b = sides
             stitch_map[(a['panel'], a['edge'])] = (b['panel'], b['edge'])
             stitch_map[(b['panel'], b['edge'])] = (a['panel'], a['edge'])
 
@@ -1327,8 +1749,6 @@ def save_combined_mesh(sim_folder, body_obj_path=None, body_name=None):
     """Create combined body + garment mesh."""
     if body_name is None:
         body_name = BODY_NAME
-    if body_obj_path is None:
-        body_obj_path = f'./assets/bodies/{body_name}.obj'
 
     import trimesh
 
@@ -1340,13 +1760,22 @@ def save_combined_mesh(sim_folder, body_obj_path=None, body_name=None):
 
     garment_path = garment_files[0]
     garment = trimesh.load(str(garment_path), process=False)
-    body = trimesh.load(str(body_obj_path), process=False)
 
-    if body.vertices.max() < 3.0:
-        body.vertices = body.vertices * 100.0
-    min_y = body.vertices[:, 1].min()
-    if min_y < 0:
-        body.vertices[:, 1] += abs(min_y)
+    # Prefer the sim's exported final-pose body (it's in the cloth's EXACT frame,
+    # so no scaling/shift needed) — this matters when the body was animated to a
+    # new pose during the sim. Skip it if an explicit body_obj_path was given.
+    final_body = list(sim_folder.glob('*_body_final.obj'))
+    if final_body and body_obj_path is None:
+        body = trimesh.load(str(final_body[0]), process=False)
+    else:
+        if body_obj_path is None:
+            body_obj_path = f'./assets/bodies/{body_name}.obj'
+        body = trimesh.load(str(body_obj_path), process=False)
+        if body.vertices.max() < 3.0:
+            body.vertices = body.vertices * 100.0
+        min_y = body.vertices[:, 1].min()
+        if min_y < 0:
+            body.vertices[:, 1] += abs(min_y)
 
     body_v = np.array(body.vertices)
     body_f = np.array(body.faces)
@@ -1423,18 +1852,16 @@ if __name__ == '__main__':
                 'Inseam': prod['Inseam'],
                 'Ankle': prod['Ankle'],
                 'Hip': prod['Low_Hip'],
-                'Thigh': prod['Thigh'],
-                'Knee': prod['Knee'],
                 'Front Rise': prod['Front Rise'],
                 'Back Rise': prod['Back Rise'],
             }
-            # Optional vertical position data from techpack:
-            # Hip_from_waist: distance from waistband seam down to hip measurement line
-            # Knee_from_crotch: distance from crotch level down to knee measurement line
-            if 'Hip_from_waist' in prod:
-                annot_meas['Hip_from_waist'] = prod['Hip_from_waist']
-            if 'Knee_from_crotch' in prod:
-                annot_meas['Knee_from_crotch'] = prod['Knee_from_crotch']
+            # Optional techpack fields — only included when the product provides them.
+            # Thigh/Knee are omitted by some garment configs (e.g. pleated or
+            # multi-segment leg styles). Hip_from_waist/Knee_from_crotch are
+            # vertical position data that some techpacks don't supply.
+            for opt_key in ('Thigh', 'Knee', 'Hip_from_waist', 'Knee_from_crotch'):
+                if opt_key in prod:
+                    annot_meas[opt_key] = prod[opt_key]
             annotate_pattern_svg(svg_files[0], spec_files[0], annot_meas)
 
     # Step 2: Verify measurements from spec JSONs

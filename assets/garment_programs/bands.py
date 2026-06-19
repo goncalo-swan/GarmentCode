@@ -66,20 +66,26 @@ class StraightWB(BaseBand):
 
         self.width = self.width * body['hips_line']
 
+        # Elastic gathered waistband (opt-in via design flag). Fully isolated:
+        # when off, the standard rectangle waistband below runs unchanged.
+        if design['waistband'].get('elastic_gather', {}).get('v', False):
+            self._build_elastic_gathered(body)
+            return
+
         self.define_panels()
 
         # For rise > 1.0 (high-rise), offset waistband above natural waist
         rise_offset = max(0, (self.rise - 1.0)) * body['hips_line']
         self.front.translate_by([0, body['_waist_level'] + rise_offset, 20])
         self.back.translate_by([0, body['_waist_level'] + rise_offset, -15])
-        
+
         self.stitching_rules = pyg.Stitches(
             (self.front.interfaces['right'], self.back.interfaces['right']),
             (self.front.interfaces['left'], self.back.interfaces['left'])
         )
 
         self.interfaces = {
-            'bottom_f': self.front.interfaces['bottom'],  
+            'bottom_f': self.front.interfaces['bottom'],
             'bottom_b': self.back.interfaces['bottom'],
 
             'top_f': self.front.interfaces['top'],
@@ -89,23 +95,87 @@ class StraightWB(BaseBand):
                 self.front.interfaces['bottom'],
                 self.back.interfaces['bottom']),
             'top': pyg.Interface.from_multiple(
-                self.front.interfaces['top'], 
+                self.front.interfaces['top'],
                 self.back.interfaces['top']),
+        }
+
+    def _build_elastic_gathered(self, body):
+        """Elastic gathered waistband: a full-width fabric band (= config Waist)
+        whose top edge is gathered into a narrow elastic band (= body waist).
+        The fabric/elastic length mismatch at the gather seam forces the cloth
+        to bunch into folds (same mechanism as the balloon-leg cuff).
+
+        Builds two stacked straight tubes (fabric + thin elastic), 4 panels.
+        Only ever called when the elastic_gather flag is set, so the standard
+        waistband path is wholly unaffected.
+        """
+        rise_offset = max(0, (self.rise - 1.0)) * body['hips_line']
+        y0 = body['_waist_level'] + rise_offset
+
+        fabric = self.top_width            # config-Waist fabric circumference
+        elastic = body['waist']            # body-waist elastic (the cinch)
+        fab_back = self.top_back_fraction
+        el_back = self.waist_back_frac
+        e_depth = min(3.0, self.width * 0.5)   # thin elastic band height
+
+        # Fabric tube (full width, full band height) — the bunched fabric.
+        self.front = StraightBandPanel(
+            'wb_front', fabric * (1 - fab_back), self.width,
+            match_int_proportion=self.body['waist'] - self.body['waist_back_width'])
+        self.back = StraightBandPanel(
+            'wb_back', fabric * fab_back, self.width,
+            match_int_proportion=self.body['waist_back_width'])
+        self.front.translate_by([0, y0, 20])
+        self.back.translate_by([0, y0, -15])
+
+        # Elastic tube (narrow), stacked just above the fabric top.
+        self.elastic_front = StraightBandPanel(
+            'wb_elastic_front', elastic * (1 - el_back), e_depth)
+        self.elastic_back = StraightBandPanel(
+            'wb_elastic_back', elastic * el_back, e_depth)
+        self.elastic_front.translate_by([0, y0 + self.width + 2, 20])
+        self.elastic_back.translate_by([0, y0 + self.width + 2, -15])
+
+        fabric_top = pyg.Interface.from_multiple(
+            self.front.interfaces['top'], self.back.interfaces['top'])
+        elastic_bottom = pyg.Interface.from_multiple(
+            self.elastic_front.interfaces['bottom'], self.elastic_back.interfaces['bottom'])
+
+        self.stitching_rules = pyg.Stitches(
+            # fabric tube side seams
+            (self.front.interfaces['right'], self.back.interfaces['right']),
+            (self.front.interfaces['left'], self.back.interfaces['left']),
+            # elastic tube side seams
+            (self.elastic_front.interfaces['right'], self.elastic_back.interfaces['right']),
+            (self.elastic_front.interfaces['left'], self.elastic_back.interfaces['left']),
+            # GATHER seam: 90.5 fabric top eased into 71.2 elastic bottom -> folds
+            (fabric_top, elastic_bottom),
+        )
+
+        self.interfaces = {
+            'bottom_f': self.front.interfaces['bottom'],
+            'bottom_b': self.back.interfaces['bottom'],
+            'bottom': pyg.Interface.from_multiple(
+                self.front.interfaces['bottom'], self.back.interfaces['bottom']),
+            'top_f': self.elastic_front.interfaces['top'],
+            'top_b': self.elastic_back.interfaces['top'],
+            'top': pyg.Interface.from_multiple(
+                self.elastic_front.interfaces['top'], self.elastic_back.interfaces['top']),
         }
 
     def define_panels(self):
         back_width = self.top_width * self.top_back_fraction
 
         self.front = StraightBandPanel(
-            'wb_front', 
-            self.top_width - back_width, 
+            'wb_front',
+            self.top_width - back_width,
             self.width,
             match_int_proportion=self.body['waist'] - self.body['waist_back_width']
         )
-          
+
         self.back = StraightBandPanel(
-            'wb_back', 
-            back_width, 
+            'wb_back',
+            back_width,
             self.width,
             match_int_proportion=self.body['waist_back_width']
         )
