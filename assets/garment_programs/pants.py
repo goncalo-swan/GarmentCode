@@ -28,7 +28,8 @@ class PantPanel(pyg.Panel):
             thigh_y=None,
             front_slit=None,
             barrel_bow=None,
-            clo_match=False) -> None:
+            clo_match=False,
+            back_rise_lift=0.0) -> None:
         """
             Basic pant panel with option to be fitted (with darts)
 
@@ -190,9 +191,15 @@ class PantPanel(pyg.Panel):
                 initial_guess=[0.5, 0]
             )
 
+        # back_rise_lift (cm): raise the center-back waist point — a "back-rise
+        # scoop". This is the start of crotch_top, so it lengthens the center
+        # rise seam and tilts the waist edge up toward center-back. Default 0.0
+        # (front always passes 0.0). NOTE: the placement is decoupled from this
+        # lift downstream (see PantsHalf), so the scoop changes shape only, not
+        # where the legs sit.
         top = pyg.Edge(
             right_top.end,
-            [w_diff + waist, length + hips_depth]
+            [w_diff + waist, length + hips_depth + back_rise_lift]
         )
 
         # arc_follow shifts the inner (crotch) edge outward to track the bulging
@@ -661,6 +668,10 @@ class PantsHalf(BaseBottoms):
             thigh_y=leg_shape_kwargs.get('thigh_y'),
             barrel_bow=barrel_bow,
             clo_match=clo_match,
+            back_rise_lift=(design['back_rise_lift']['v']
+                            if isinstance(design.get('back_rise_lift'), dict)
+                            and design['back_rise_lift'].get('v') is not None
+                            else 0.0),
             ).translate_by([0, body['_waist_level'] - 5 + rise_offset, -20])
 
         self.stitching_rules = pyg.Stitches(

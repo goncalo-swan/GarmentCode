@@ -826,11 +826,12 @@ def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
     # max-eval cap stops us at a worse spot than something we already saw.
     best = {'score': float('inf')}
 
-    def measure(rise_v, front_fraction):
+    def measure(rise_v, front_fraction, back_lift):
         gm = dict(base_garment_measurements)
         gm['rise'] = rise_v
         design = mapper.map_pants(gm)
         design['pants']['front_crotch_fraction'] = {'v': float(front_fraction)}
+        design['pants']['back_rise_lift'] = {'v': float(back_lift)}
         try:
             garment = MetaGarment('_fit', body_params, design)
             pattern = garment.assembly()
@@ -846,7 +847,8 @@ def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
         b = _rise_seam_arc_length(panels, stitches, 'pant_b_l', 'pant_b_r')
         score = max(abs(f - target_f), abs(b - target_b))
         if score < best['score']:
-            best.update(score=score, rise_v=rise_v, frac=front_fraction, f=f, b=b)
+            best.update(score=score, rise_v=rise_v, frac=front_fraction,
+                        lift=back_lift, f=f, b=b)
         return f, b
 
     # Initial guess: rise_v from the average-rise formula, frac centered.
@@ -855,38 +857,51 @@ def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
     rise0 = float(np.clip((avg_rise - body['crotch_hip_diff']) / body['hips_line'],
                           RISE_MIN, RISE_MAX))
     frac0 = 0.55
+    lift0 = 0.0
+
+    # back_rise_lift (cm): a "back-rise scoop" — raises the center-back waist,
+    # lengthening the back rise INDEPENDENTLY of the front. This is the 3rd DOF
+    # that makes back-heavy splits (BR-FR > ~8cm) reachable; front_crotch_fraction
+    # alone caps the spread at ~8cm because crotch_top is shared front/back.
+    LIFT_MIN, LIFT_MAX = 0.0, 15.0
+    # The system is 2 targets / 3 unknowns (underdetermined), so add a small
+    # regularizer on the lift: among the solution family, prefer the smallest
+    # scoop (lift→0 for pids already achievable in 2 DOF, leaving them unchanged).
+    LIFT_REG = 0.03
 
     print(f'  Fitting rise: target F={target_f:.1f}cm, B={target_b:.1f}cm  '
-          f'(start rise_v={rise0:.4f}, frac={frac0:.4f})')
+          f'(start rise_v={rise0:.4f}, frac={frac0:.4f}, lift={lift0:.2f})')
 
     def residual(x):
         rv = float(np.clip(x[0], RISE_MIN, RISE_MAX))
         fr = float(np.clip(x[1], FRAC_MIN, FRAC_MAX))
-        f, b = measure(rv, fr)
-        return np.array([f - target_f, b - target_b])
+        lf = float(np.clip(x[2], LIFT_MIN, LIFT_MAX))
+        f, b = measure(rv, fr, lf)
+        return np.array([f - target_f, b - target_b, LIFT_REG * lf])
 
     # diff_step=0.05 gives a ~5%-of-range FD step. The default ~1.5e-8 is far
     # too small for measure() — pattern build introduces tiny numerical jitter
     # that drowns the gradient signal at that scale, producing useless Jacobians.
     res = least_squares(
-        residual, np.array([rise0, frac0]),
+        residual, np.array([rise0, frac0, lift0]),
         method='trf',
-        bounds=([RISE_MIN, FRAC_MIN], [RISE_MAX, FRAC_MAX]),
+        bounds=([RISE_MIN, FRAC_MIN, LIFT_MIN], [RISE_MAX, FRAC_MAX, LIFT_MAX]),
         diff_step=0.05,
-        max_nfev=60,
+        max_nfev=90,
         xtol=1e-6, ftol=1e-6,
     )
 
     rise_v = best['rise_v']
     front_fraction = best['frac']
+    back_lift = best['lift']
     print(f'  Joint LSQ ({res.nfev} evals, status={res.status}): '
-          f'rise_v={rise_v:.4f}, frac={front_fraction:.4f} '
+          f'rise_v={rise_v:.4f}, frac={front_fraction:.4f}, lift={back_lift:.2f}cm '
           f'→ F={best["f"]:.2f}cm (Δ{best["f"] - target_f:+.2f}), '
           f'B={best["b"]:.2f}cm (Δ{best["b"] - target_b:+.2f})')
     if best['score'] >= 0.05:
         print(f'  NOTE: max-error {best["score"]:.2f}cm above 0.05cm threshold — '
               f'targets may not be jointly achievable in this search space.')
-    return rise_v, front_fraction
+    return rise_v, front_fraction, back_lift
 
 
 def map_production_to_design(prod, body_yaml_path, elastic_waistband=False,
@@ -953,11 +968,13 @@ def map_production_to_design(prod, body_yaml_path, elastic_waistband=False,
     }
 
     if 'Front Rise' in prod and 'Back Rise' in prod:
-        # Fit rise_v and front_crotch_fraction to match production seam arc targets
-        rise_v, front_fraction = _fit_rise_parameters(prod, body_yaml_path, garment_measurements)
+        # Fit rise_v, front_crotch_fraction, and back_rise_lift to match production
+        # seam arc targets (3 DOF: total rise, F/B crotch split, back-rise scoop)
+        rise_v, front_fraction, back_lift = _fit_rise_parameters(prod, body_yaml_path, garment_measurements)
         garment_measurements['rise'] = rise_v
         design = mapper.map_pants(garment_measurements)
         design['pants']['front_crotch_fraction'] = {'v': float(front_fraction)}
+        design['pants']['back_rise_lift'] = {'v': float(back_lift)}
     else:
         # Fall back: use average of available rise values
         rises = [v for k, v in prod.items() if 'Rise' in k and v is not None]
@@ -1152,7 +1169,9 @@ def _apply_pose_x_rotation(folder, body_obj_path,
                            top_band_height=15.0,
                            top_band_offset_below_crotch=15.0,
                            bot_band_height=20.0,
-                           min_angle_deg=0.5):
+                           min_angle_deg=0.5,
+                           back_rise_lift=0.0,
+                           extra_x_sep=0.0):
     """Per-leg translation + Z rotation to align pant legs with diagonally
     asymmetric body legs (HM-style A-pose bodies). Each leg's two panels (front
     + back) translate and rotate as a rigid pair around their shared top-center
@@ -1182,7 +1201,12 @@ def _apply_pose_x_rotation(folder, body_obj_path,
                    for n in needed}
     panel_y_min = {n: panels[n]['translation'][1] + min(v[1] for v in panels[n]['vertices'])
                    for n in needed}
-    leg_top_y = max(panel_y_max.values())
+    # Use the UN-scooped waist level as the leg top: the back-rise scoop raises
+    # the (always-highest) center-back corner by back_rise_lift, so the raw max
+    # would push the body-leg sampling band / pivot up by the lift and shift the
+    # pose-X correction (up to ~2.8cm at large lifts). Subtracting back_rise_lift
+    # recovers the no-scoop reference; no-op when back_rise_lift=0.
+    leg_top_y = max(panel_y_max.values()) - back_rise_lift
     leg_bot_y = min(panel_y_min.values())
     leg_length = leg_top_y - leg_bot_y
 
@@ -1201,12 +1225,26 @@ def _apply_pose_x_rotation(folder, body_obj_path,
     print(f'    body bot band Y=[{bot_band[0]:.2f}, {bot_band[1]:.2f}]  L={body_bot_L:+.2f} R={body_bot_R:+.2f}')
 
     def pivot_x_for_leg(panel_names):
+        # Average X over the panel's full top (waist) edge. The back-rise scoop
+        # raises ONLY the center-back corner by `back_rise_lift`, tilting the back
+        # waist edge; an exact `v[1] == ymax` test would then pick only that
+        # raised corner and skew the pivot ~half-a-waist toward center-back,
+        # splaying the legs. A Y tolerance spanning the tilt averages the whole
+        # waist edge, giving the true waist-center X — invariant to the scoop
+        # (the lift moves the corner in Y only, never X). tol→0.5 with no scoop,
+        # reproducing the original flat-waist behaviour exactly.
         xs = []
         for n in panel_names:
             p = panels[n]
+            # Only the BACK panel carries the scoop (its waist edge tilts up to
+            # center-back), so only it needs a tolerance spanning the lift. The
+            # FRONT waist is flat — giving it the large tolerance would wrongly
+            # pull in side-seam vertices below the waist and skew the pivot
+            # (seen as a ~2.8cm placement shift at large lifts). Keep front tight.
+            tol = (back_rise_lift + 0.5) if n.startswith('pant_b') else 0.5
             ymax = max(v[1] for v in p['vertices'])
             xs.extend(p['translation'][0] + v[0]
-                      for v in p['vertices'] if v[1] == ymax)
+                      for v in p['vertices'] if v[1] >= ymax - tol)
         return sum(xs) / len(xs) if xs else None
 
     pivot_L_x = pivot_x_for_leg(['pant_f_l', 'pant_b_l'])
@@ -1218,11 +1256,47 @@ def _apply_pose_x_rotation(folder, body_obj_path,
     theta_L = math.atan2(body_bot_L - body_top_L, leg_length)
     theta_R = math.atan2(body_bot_R - body_top_R, leg_length)
 
+    # Adaptive outward X separation. The pose alignment glues each leg's waist
+    # pivot to its body-leg center; for a deep DXF front-crotch hook this leaves
+    # the two front panels' fly edges (and the back panels' CB edges) overlapping
+    # at init -> a self-contact mess in the boxmesh. Measure that overlap on THIS
+    # body+size -- the front/back panels' inward x-reach AFTER the body-align
+    # shift+rotation -- and push each leg out by half of it plus a target gap, so
+    # the hooks clear regardless of body leg spacing or garment size. The fly/CB
+    # stitches close the gap during zero-gravity, so the final drape is unchanged.
+    # `extra_x_sep` is the target clearance gap; 0.0 -> feature off (no-op for
+    # every existing config; only the next.dxf PantsCLO path enables it).
+    if extra_x_sep:
+        def _post_x_extent(panel, shift_x, theta, pivot_x):
+            # world x-extent of the panel after apply_rigid(shift_x, theta)
+            c, s = math.cos(theta), math.sin(theta)
+            tx, ty = panel['translation'][0], panel['translation'][1]
+            new_tx = (pivot_x + shift_x) + (tx - pivot_x) * c - (ty - pivot_y) * s
+            ang = math.radians(panel['rotation'][2]) + theta
+            ca, sa = math.cos(ang), math.sin(ang)
+            xs = [v[0] * ca - v[1] * sa + new_tx for v in panel['vertices']]
+            return min(xs), max(xs)
+
+        def _fly_overlap(rname, lname):
+            rmin, rmax = _post_x_extent(panels[rname], shift_R, theta_R, pivot_R_x)
+            lmin, lmax = _post_x_extent(panels[lname], shift_L, theta_L, pivot_L_x)
+            # positive == the two panels cross the centerline into each other
+            return (rmax - lmin) if body_top_L > body_top_R else (lmax - rmin)
+
+        overlap = max(_fly_overlap('pant_f_r', 'pant_f_l'),
+                      _fly_overlap('pant_b_r', 'pant_b_l'))
+        sep = max(0.0, (overlap + extra_x_sep) / 2.0)
+        shift_L += math.copysign(sep, body_top_L)
+        shift_R += math.copysign(sep, body_top_R)
+        print(f'    adaptive x-sep: max fly/CB overlap={overlap:+.2f} '
+              f'-> sep=±{sep:.2f} (target gap {extra_x_sep})')
+
     print(f'    garment pivots L={pivot_L_x:+.2f} R={pivot_R_x:+.2f}  pivot_y={pivot_y:.2f}')
     print(f'    shifts L={shift_L:+.2f} R={shift_R:+.2f}')
     print(f'    angles L={math.degrees(theta_L):+.2f}° R={math.degrees(theta_R):+.2f}°')
 
-    if abs(math.degrees(theta_L)) < min_angle_deg and abs(math.degrees(theta_R)) < min_angle_deg \
+    if not extra_x_sep \
+            and abs(math.degrees(theta_L)) < min_angle_deg and abs(math.degrees(theta_R)) < min_angle_deg \
             and abs(shift_L) < 0.5 and abs(shift_R) < 0.5:
         print('    below min thresholds; no transform applied')
         return
@@ -1337,6 +1411,12 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
     garment_name = f'{name_prefix}{garment_prefix}_size{size}'
 
     body = BodyParameters(body_yaml_path)
+    # Ensure the body mesh has its feet at Y=0 (SMPL fits come out
+    # pelvis-centered). Both the pose-X leg sampling below and the sim's body
+    # collision assume the feet-at-0 convention; without this a pelvis-centered
+    # body fails leg sampling (pose-X + x-sep skipped) and drapes misaligned.
+    # In-place and idempotent (no-op when already normalized, e.g. HM bodies).
+    normalize_body_mesh(str(body_yaml_path).replace('.yaml', '.obj'))
     garment = MetaGarment(garment_name, body, design)
 
     band_width = (design.get('waistband', {}).get('width', {}).get('v', 0.0)
@@ -1378,11 +1458,27 @@ def generate_pattern(size, design, body_yaml_path, output_base, name_prefix='',
     # Adjust panel X-translations so each pant leg lands on its corresponding
     # body leg, handling asymmetric body poses. Auto-detects the asymmetry; for
     # symmetric bodies the threshold check inside makes this a no-op.
+    # Extra leg X-separation for the next.dxf PantsCLO path: its DXF front-crotch
+    # hook is deep enough that the two legs' fly edges overlap ~11cm at init.
+    # `clo_dxf.x_sep` (a profile-supplied half-distance) clears it; absent/zero
+    # for every other config, so this is a no-op for the whole HM_Jeans batch.
+    _xsep = 0.0
+    _clo = design.get('clo_dxf')
+    if isinstance(_clo, dict):
+        _dxf_path = _clo.get('path', {}).get('v') if isinstance(_clo.get('path'), dict) else _clo.get('path')
+        if _dxf_path:
+            from assets.garment_programs.pants_clo import _profile
+            _xsep = float(_profile(_dxf_path).get('x_sep', 0.0) or 0.0)
+
     body_obj = Path(str(body_yaml_path).replace('.yaml', '.obj'))
     if body_obj.exists():
         mode = os.environ.get('POSE_MODE', 'rotate')
+        _brl = (design['pants']['back_rise_lift']['v']
+                if isinstance(design.get('pants', {}).get('back_rise_lift'), dict)
+                and design['pants']['back_rise_lift'].get('v') is not None
+                else 0.0)
         if mode == 'rotate':
-            _apply_pose_x_rotation(folder, body_obj)
+            _apply_pose_x_rotation(folder, body_obj, back_rise_lift=_brl, extra_x_sep=_xsep)
         else:
             max_shift_override = float(os.environ.get('MAX_SHIFT', '3.0'))
             _apply_pose_x_correction(folder, body_obj, max_shift=max_shift_override)
@@ -1467,6 +1563,14 @@ def simulate_pattern(pattern_folder, garment_name, output_base,
     )
 
     props.serialize(paths.element_sim_props)
+    # Always emit the combined body+garment mesh (combined.obj + combined.glb),
+    # so direct simulate_pattern callers get it too -- run_garment.py's Step 4
+    # only covers its own flow. Uses the exact-frame _body_final.obj written by
+    # the sim, so no rescaling/repose handling is needed here.
+    try:
+        save_combined_mesh(paths.out_el, body_name=body_name)
+    except Exception as e:
+        print(f'  Combined mesh skipped: {e}')
     print(f'  Simulation complete: {in_name} -> {paths.out_el}')
     return paths.out_el
 
