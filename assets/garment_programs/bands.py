@@ -59,10 +59,21 @@ class StraightWB(BaseBand):
         # waistband width stays at waist measurement (narrowest)
         interp_factor = min(self.rise + self.width, 1.0)
 
-        self.top_width = pyg.utils.lin_interpolation(
-            self.hips, self.waist, interp_factor)
-        self.top_back_fraction = pyg.utils.lin_interpolation(
-            self.hips_back_frac, self.waist_back_frac, interp_factor)
+        # Default: build the band to the actual waist circumference so the
+        # garment's waist equals the spec, rather than the rise->hips
+        # interpolated surrogate (which double-counts — the production waist
+        # already encodes the worn/low-rise circumference). The pants top edge
+        # matches the band at assembly via the ruffle/stitch ratio.
+        # Exception: elastic-gathered bands keep the interpolated (config-Waist)
+        # fabric width, which their gather logic depends on.
+        if design['waistband'].get('elastic_gather', {}).get('v', False):
+            self.top_width = pyg.utils.lin_interpolation(
+                self.hips, self.waist, interp_factor)
+            self.top_back_fraction = pyg.utils.lin_interpolation(
+                self.hips_back_frac, self.waist_back_frac, interp_factor)
+        else:
+            self.top_width = self.waist
+            self.top_back_fraction = self.waist_back_frac
 
         self.width = self.width * body['hips_line']
 
