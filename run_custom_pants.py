@@ -818,7 +818,7 @@ def _fit_rise_parameters(prod, body_yaml_path, base_garment_measurements):
 
     # FRAC_MIN: below this the front crotch extension goes ~0, which causes
     # Bézier curve fitting to degenerate.
-    RISE_MIN, RISE_MAX = 0.3, 1.8
+    RISE_MIN, RISE_MAX = 0.2, 1.8
     FRAC_MIN, FRAC_MAX = 0.10, 0.99
 
     # Best-seen fallback: even with LSQ, return the closest iterate visited

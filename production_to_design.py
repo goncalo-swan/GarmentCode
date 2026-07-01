@@ -535,11 +535,11 @@ class ProductionToDesign:
                 crotch_increase = thigh_circ - per_leg_crotch
                 flare_v -= crotch_increase / b['leg_circ']
 
-        flare_v = np.clip(flare_v, 0.3, 1.2)
+        flare_v = np.clip(flare_v, 0.3, 2.0)
 
         # Rise: how high the waistband sits (1.0 = natural waist, >1.0 = high-rise)
         rise_v = garment.get('rise', 1.0)
-        rise_v = np.clip(rise_v, 0.5, 1.5)
+        rise_v = np.clip(rise_v, 0.2, 1.5)   # low bound 0.2 enables true low-rise (was 0.5, which floored the front rise ~18.9cm)
 
         # Crotch-to-knee distance override from production data (cm)
         crotch_to_knee = garment.get('crotch_to_knee')
